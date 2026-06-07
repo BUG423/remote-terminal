@@ -7,13 +7,35 @@
 set -e
 
 # ── 配置 ──────────────────────────────────────────────────────────
-SERVER_HOST="8.138.246.166"
-SERVER_USER="root"
-SERVER_PORT="22"
-PROJECT_DIR="/home/zss/workspace/claude-web"
+# 从 config.json 读取配置
+CONFIG_FILE="$(cd "$(dirname "$0")" && pwd)/config.json"
 
-echo "🚀 Claude Web — 部署到阿里云服务器"
-echo "   目标: ${SERVER_USER}@${SERVER_HOST}"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ 未找到 config.json，请先创建:"
+    echo "   cp config.json.example config.json"
+    echo "   然后编辑 config.json 填入你的信息"
+    exit 1
+fi
+
+# 解析 JSON（不需要 jq，用 node 解析）
+parse_json() {
+    node -e "const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf8')); console.log(c.$1 || '')"
+}
+
+SERVER_HOST=$(parse_json "serverHost")
+SERVER_PORT=$(parse_json "serverPort")
+SERVER_USER="${SERVER_USER:-root}"
+
+if [ -z "$SERVER_HOST" ]; then
+    echo "❌ config.json 中未配置 serverHost"
+    echo "   请编辑 config.json 填入你的云服务器 IP 地址"
+    exit 1
+fi
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "🚀 Claude Web — 部署到云服务器"
+echo "   目标: ${SERVER_USER}@${SERVER_HOST}:${SERVER_PORT}"
 echo ""
 
 # ── 1. 检查 sshpass ──────────────────────────────────────────────
@@ -130,13 +152,15 @@ sleep 2
 HEALTH=$($SSH ${SERVER_USER}@${SERVER_HOST} 'curl -s http://localhost:3000/health 2>/dev/null')
 echo "  Health check: ${HEALTH}"
 
+TOKEN=$(parse_json "token")
+
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║  ✅ 部署完成！                                      ║"
 echo "║                                                    ║"
-echo "║  访问地址: http://${SERVER_HOST}:3000                 ║"
-echo "║  Token: NNvEOIh2xapSnHr6Hi5mK0AN-PkCpr5t            ║"
+echo "║  访问地址: http://${SERVER_HOST}:3000                ║"
+echo "║  Token: ${TOKEN}                                    ║"
 echo "║                                                    ║"
 echo "║  下一步: 在你的本地机器上启动 Agent                    ║"
-echo "║  cd agent && npm install && npm start              ║"
+echo "║  bash start-local.sh                               ║"
 echo "╚══════════════════════════════════════════════════════╝"

@@ -1,9 +1,23 @@
 {
+  "_comment": "=== Claude Web 配置文件 ===",
+  "_instructions": "复制此文件为 config.json 并填入你的信息: cp config.json.example config.json",
+
   "port": 3000,
-  "token": "your-shared-secret-token-here-change-me",
-  "serverHost": "your-alibaba-cloud-server-ip",
+  "_port_comment": "服务器监听端口，默认 3000",
+
+  "token": "your-shared-secret-token-change-me",
+  "_token_comment": "用于 Agent 和浏览器客户端认证的共享密钥。生成方式: node -e \"console.log(require('crypto').randomBytes(24).toString('base64url'))\"",
+
+  "serverHost": "your-server-ip-or-domain",
+  "_serverHost_comment": "云服务器的公网 IP 地址或域名。Agent 和浏览器都将连接到此地址。",
+
   "serverPort": 3000,
+  "_serverPort_comment": "云服务器上 WebSocket 服务的端口，需与 port 保持一致。",
+
   "useTLS": false,
-  "tlsCertPath": "/etc/letsencrypt/live/your-domain/fullchain.pem",
-  "tlsKeyPath": "/etc/letsencrypt/live/your-domain/privkey.pem"
+  "_useTLS_comment": "是否启用 TLS/WSS 加密。生产环境强烈建议开启，需配置 Nginx + Let's Encrypt 证书。",
+
+  "tlsCertPath": "/etc/letsencrypt/live/your-domain.com/fullchain.pem",
+  "tlsKeyPath": "/etc/letsencrypt/live/your-domain.com/privkey.pem",
+  "_tls_comment": "TLS 证书路径。仅在 useTLS=true 时需要，通常通过 Nginx 反向代理处理 SSL，此处保持默认即可。"
 }
