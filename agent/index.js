@@ -31,7 +31,7 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 30000;
 
 // Track running Claude processes per session
-const activeProcesses = new Map();  // sessionId -> { proc, queue: [] }
+const activeProcesses = new Map();  // sessionId -> { proc, queue: [], history: [] }
 
 // ─── WebSocket Connection ────────────────────────────────────────
 function connect() {
@@ -139,6 +139,22 @@ function handleChatMessage(data) {
 
   console.log(`💬 [${sessionId.slice(0, 8)}] New message: "${message.slice(0, 80)}${message.length > 80 ? '...' : ''}"`);
 
+  // Handle /clear command — reset conversation history
+  if (message.trim() === '/clear') {
+    if (activeProcesses.has(sessionId)) {
+      activeProcesses.get(sessionId).history = [];
+      activeProcesses.get(sessionId).queue = [];
+    }
+    console.log(`   🧹 Cleared history for session ${sessionId.slice(0, 8)}`);
+    send({
+      type: 'status',
+      sessionId,
+      status: 'done',
+      message: 'Conversation cleared'
+    });
+    return;
+  }
+
   // Check if there's already a process for this session
   if (activeProcesses.has(sessionId)) {
     const session = activeProcesses.get(sessionId);
@@ -158,8 +174,10 @@ function handleChatMessage(data) {
 function runClaudeProcess(sessionId, message) {
   // Initialize session tracking
   if (!activeProcesses.has(sessionId)) {
-    activeProcesses.set(sessionId, { proc: null, queue: [] });
+    activeProcesses.set(sessionId, { proc: null, queue: [], history: [] });
   }
+
+  const session = activeProcesses.get(sessionId);
 
   // Send "thinking" status
   send({
@@ -172,10 +190,24 @@ function runClaudeProcess(sessionId, message) {
     '-p',                             // --print mode
     '--verbose',                       // required for stream-json output
     '--output-format', 'stream-json', // streaming JSON output
-    '--session-id', sessionId,        // maintain conversation state
   ];
 
-  console.log(`   🚀 [${new Date().toLocaleTimeString()}] Starting: claude ${args.join(' ')}`);
+  // Build conversation context from history
+  let prompt = message;
+  if (session.history.length > 0) {
+    const parts = ['Previous conversation:\n'];
+    for (const turn of session.history) {
+      parts.push(`User: ${turn.user}`);
+      if (turn.assistant) {
+        parts.push(`Assistant: ${turn.assistant}`);
+      }
+    }
+    parts.push('\n---\n');
+    parts.push(`User's latest message: ${message}`);
+    prompt = parts.join('\n');
+  }
+
+  console.log(`   🚀 [${new Date().toLocaleTimeString()}] Starting: claude ${args.join(' ')} (history: ${session.history.length} turns)`);
 
   const proc = spawn('claude', args, {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -186,6 +218,7 @@ function runClaudeProcess(sessionId, message) {
 
   let buffer = '';
   let closed = false;  // Guard against double-close (error + close both fire)
+  let lastResult = null;  // Track the final result text for conversation history
 
   function finalize(exitCode, isError, errorMsg) {
     // Prevent double-processing: error + close both fire for the same process
@@ -199,7 +232,25 @@ function runClaudeProcess(sessionId, message) {
       try {
         const event = JSON.parse(buffer);
         send({ type: 'stream', sessionId, event });
+        if (event.type === 'result' && event.result) {
+          lastResult = event.result;
+        }
       } catch { /* ignore */ }
+    }
+
+    // Append to conversation history
+    if (lastResult && !isError) {
+      const session = activeProcesses.get(sessionId);
+      if (session) {
+        session.history.push({
+          user: message,
+          assistant: lastResult
+        });
+        // Keep history bounded (last 50 turns)
+        if (session.history.length > 50) {
+          session.history = session.history.slice(-50);
+        }
+      }
     }
 
     if (isError) {
@@ -241,6 +292,10 @@ function runClaudeProcess(sessionId, message) {
       try {
         const event = JSON.parse(line);
         send({ type: 'stream', sessionId, event });
+        // Capture the final result text for conversation history
+        if (event.type === 'result' && event.result) {
+          lastResult = event.result;
+        }
       } catch {
         console.warn(`   ⚠  Non-JSON output: ${line.slice(0, 100)}`);
       }
@@ -265,7 +320,7 @@ function runClaudeProcess(sessionId, message) {
     // If stdin fails, the process will exit on its own → close handler fires
   });
 
-  const written = proc.stdin.write(message + '\n');
+  const written = proc.stdin.write(prompt + '\n');
   proc.stdin.end();
 
   if (!written) {
