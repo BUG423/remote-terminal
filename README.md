@@ -57,8 +57,8 @@ Claude Web 让你在任何设备（手机、平板、笔记本）的浏览器上
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/BUG423/Claude-Web.git
-cd Claude-Web
+git clone https://github.com/BUG423/Web-Claude.git
+cd Web-Claude
 
 # 2. 创建配置文件
 cp config.json.example config.json
