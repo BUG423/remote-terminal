@@ -1,0 +1,9 @@
+{
+  "port": 3000,
+  "token": "your-shared-secret-token-here-change-me",
+  "serverHost": "your-alibaba-cloud-server-ip",
+  "serverPort": 3000,
+  "useTLS": false,
+  "tlsCertPath": "/etc/letsencrypt/live/your-domain/fullchain.pem",
+  "tlsKeyPath": "/etc/letsencrypt/live/your-domain/privkey.pem"
+}

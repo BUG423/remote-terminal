@@ -1,0 +1,13 @@
+{
+  "name": "claude-web-agent",
+  "version": "1.0.0",
+  "description": "Local agent for Claude Web — bridges cloud server to local Claude Code",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

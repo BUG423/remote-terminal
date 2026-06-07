@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <title>Claude Web</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- ── Login Screen ─────────────────────────────────────── -->
+  <div id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="login-icon">🤖</div>
+      <h1>Claude Web</h1>
+      <p class="login-subtitle">远程访问你的 Claude Code</p>
+      <form id="login-form">
+        <label for="token-input">访问 Token</label>
+        <input type="password" id="token-input" placeholder="输入你的访问 Token..." autocomplete="off">
+        <button type="submit" id="login-btn">连接</button>
+      </form>
+      <p id="login-error" class="error-msg hidden"></p>
+    </div>
+  </div>
+
+  <!-- ── Chat Screen ──────────────────────────────────────── -->
+  <div id="chat-screen" class="screen hidden">
+    <!-- Header -->
+    <header id="chat-header">
+      <div class="header-left">
+        <button id="new-session-btn" title="新建会话">＋</button>
+        <span class="header-title">Claude Web</span>
+      </div>
+      <div class="header-right">
+        <span id="agent-status" class="status-dot offline" title="Agent 状态"></span>
+        <span id="agent-label">离线</span>
+      </div>
+    </header>
+
+    <!-- Messages -->
+    <div id="messages-container">
+      <div id="messages"></div>
+    </div>
+
+    <!-- Input Area -->
+    <div id="input-area">
+      <textarea
+        id="message-input"
+        rows="1"
+        placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+        autofocus
+      ></textarea>
+      <button id="send-btn" title="发送">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Scripts ──────────────────────────────────────────── -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
