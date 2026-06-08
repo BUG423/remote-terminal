@@ -19,12 +19,17 @@ if ! command -v node &> /dev/null; then
 fi
 echo "✅ Node.js $(node --version)"
 
-# ── 2. 检查 Claude CLI ──────────────────────────────────────────
-if ! command -v claude &> /dev/null; then
-    echo "❌ 未找到 claude 命令，请先安装 Claude Code"
-    exit 1
+# ── 2. 检查 Claude CLI（可选：仅旧聊天模式需要） ───────────────
+if command -v claude &> /dev/null; then
+    echo "✅ Claude Code $(claude --version 2>/dev/null | head -1)"
+else
+    echo "⚠  未找到 claude 命令（终端功能不需要它；如需旧聊天模式请安装 Claude Code）"
 fi
-echo "✅ Claude Code $(claude --version 2>/dev/null | head -1)"
+
+# ── 2.1 检查 node-pty 编译依赖 ──────────────────────────────────
+for tool in python3 make g++; do
+    command -v "$tool" &> /dev/null || echo "⚠  缺少 $tool —— node-pty 首次安装需要编译，请安装 build-essential / python3"
+done
 
 # ── 3. 检查配置 ─────────────────────────────────────────────────
 if [ ! -f config.json ]; then

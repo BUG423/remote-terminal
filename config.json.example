@@ -17,6 +17,9 @@
   "useTLS": false,
   "_useTLS_comment": "是否启用 TLS/WSS 加密。生产环境强烈建议开启，需配置 Nginx + Let's Encrypt 证书。",
 
+  "workspaceRoot": "~/WebClaudeWorkspaces",
+  "_workspaceRoot_comment": "【Agent 端】工作区根目录。每个会话在此目录下创建独立子目录，命令默认在该子目录执行。所有会话被强制限制在此根目录内（安全边界）。支持 ~ 展开。",
+
   "tlsCertPath": "/etc/letsencrypt/live/your-domain.com/fullchain.pem",
   "tlsKeyPath": "/etc/letsencrypt/live/your-domain.com/privkey.pem",
   "_tls_comment": "TLS 证书路径。仅在 useTLS=true 时需要，通常通过 Nginx 反向代理处理 SSL，此处保持默认即可。"

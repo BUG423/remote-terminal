@@ -8,6 +8,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
+    "node-pty": "^1.1.0",
     "ws": "^8.18.0"
   }
 }

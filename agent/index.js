@@ -1,54 +1,76 @@
+/**
+ * ═══════════════════════════════════════════════════════════════
+ * Claude Web — 本地 Agent
+ *
+ * 职责：
+ *   - 连接云服务器（带自动重连）
+ *   - 管理多个交互式终端会话（创建 / 输入 / resize / 删除）
+ *   - 每个会话绑定一个独立工作目录
+ *   - 兼容旧的 Claude Code 聊天协议（chat / stream-json）
+ * ═══════════════════════════════════════════════════════════════
+ */
+
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const WebSocket = require('ws');
+const sessionManager = require('./session-manager');
 
-// ─── Configuration ───────────────────────────────────────────────
+// ─── 配置 ───────────────────────────────────────────────────────
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 let config;
-
 try {
   config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 } catch (err) {
-  console.error('❌ Failed to load config.json. Copy config.json.example to config.json and edit it.');
+  console.error('❌ 加载 config.json 失败，请复制 config.json.example 为 config.json 并编辑。');
   console.error(err.message);
   process.exit(1);
 }
+
+// 极简 .env 加载：把 ../.env 中的 KEY=VALUE 注入 process.env
+(function loadDotEnv() {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf-8');
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^\s*([\w.]+)\s*=\s*(.*)\s*$/);
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    }
+  } catch { /* 无 .env 文件则忽略 */ }
+})();
+
+// token 优先级：环境变量 > config.json
+config.token = process.env.CLAUDE_WEB_TOKEN || config.token;
 
 const {
   token,
   serverHost,
   serverPort = 3000,
-  useTLS = false
+  useTLS = false,
+  workspaceRoot,
 } = config;
 
 const SERVER_URL = `${useTLS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
+const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
 
-// ─── State ───────────────────────────────────────────────────────
+// ─── 状态 ───────────────────────────────────────────────────────
 let ws = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY = 30000;
 
-// Track running Claude processes per session
-const activeProcesses = new Map();  // sessionId -> { proc, queue: [], history: [] }
+// 旧聊天协议：每会话的 claude 进程
+const chatProcesses = new Map(); // sessionId -> { proc, queue, history }
 
-// ─── WebSocket Connection ────────────────────────────────────────
+// ─── WebSocket 连接 ─────────────────────────────────────────────
 function connect() {
-  console.log(`🔗 Connecting to server: ${SERVER_URL}`);
-
+  console.log(`🔗 正在连接服务器: ${SERVER_URL}`);
   ws = new WebSocket(SERVER_URL);
 
   ws.on('open', () => {
-    console.log('✅ Connected to server');
+    console.log('✅ 已连接到服务器');
     reconnectAttempts = 0;
-
-    // Authenticate as agent
-    ws.send(JSON.stringify({
-      type: 'auth',
-      token,
-      role: 'agent'
-    }));
+    ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
   });
 
   ws.on('message', (raw) => {
@@ -56,44 +78,29 @@ function connect() {
     try {
       data = JSON.parse(raw.toString());
     } catch {
-      console.warn('⚠  Received invalid JSON from server');
+      console.warn('⚠  收到无效 JSON');
       return;
     }
     handleMessage(data);
   });
 
-  ws.on('close', (code, reason) => {
-    console.log(`🔌 Disconnected from server (code: ${code})`);
-
-    // Kill all running Claude processes — they're orphaned without the relay
-    for (const [sessionId, session] of activeProcesses) {
-      if (session.proc) {
-        console.log(`   🛑 Killing orphaned process for session ${sessionId.slice(0, 8)}`);
-        session.proc.kill('SIGTERM');
-        session.proc = null;
-      }
-    }
-
+  ws.on('close', (code) => {
+    console.log(`🔌 与服务器断开 (code: ${code})`);
+    // 终端进程保持存活（用户重连后可继续），仅标记聊天进程清理
     ws = null;
     scheduleReconnect();
   });
 
   ws.on('error', (err) => {
-    console.error('⚠  WebSocket error:', err.message);
-    // The 'close' event will fire next, triggering reconnect
+    console.error('⚠  WebSocket 错误:', err.message);
   });
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
-
-  const delay = Math.min(
-    1000 * Math.pow(2, reconnectAttempts),
-    MAX_RECONNECT_DELAY
-  );
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
   reconnectAttempts++;
-
-  console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
+  console.log(`🔄 ${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)...`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -105,181 +112,178 @@ function send(data) {
     ws.send(JSON.stringify(data));
     return true;
   }
-  console.warn('⚠  Cannot send: not connected');
   return false;
 }
 
-// ─── Message Handler ────────────────────────────────────────────
+/** 向服务器上报完整会话列表 */
+function reportSessions() {
+  send({ type: 'sessions', sessions: sessionManager.listSessions() });
+}
+
+// ─── 消息处理 ───────────────────────────────────────────────────
 function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
-      console.log('🤖 Authenticated as agent');
+      console.log('🤖 Agent 认证成功');
+      reportSessions();
       break;
 
+    // ── 终端：创建 ────────────────────────────────────────────
+    case 'terminal_create':
+      onTerminalCreate(data);
+      break;
+
+    // ── 终端：输入 ────────────────────────────────────────────
+    case 'terminal_input': {
+      const session = sessionManager.getSession(data.sessionId);
+      if (session && session.status === 'running') {
+        session.terminal.write(data.data);
+      } else {
+        send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在或已退出，请重新创建会话' });
+      }
+      break;
+    }
+
+    // ── 终端：resize ─────────────────────────────────────────
+    case 'terminal_resize': {
+      const session = sessionManager.getSession(data.sessionId);
+      if (session) session.terminal.resize(data.cols, data.rows);
+      break;
+    }
+
+    // ── 终端：删除 ────────────────────────────────────────────
+    case 'terminal_delete': {
+      sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
+      send({ type: 'terminal_closed', sessionId: data.sessionId });
+      reportSessions();
+      break;
+    }
+
+    // ── 请求会话列表 ──────────────────────────────────────────
+    case 'terminal_list':
+      reportSessions();
+      break;
+
+    // ── 旧聊天协议 ────────────────────────────────────────────
     case 'chat':
       handleChatMessage(data);
       break;
 
     case 'pong':
-      // Heartbeat response
       break;
 
     default:
-      console.log('📩 Unknown message type:', data.type);
+      console.log('📩 未知消息类型:', data.type);
   }
 }
 
-function handleChatMessage(data) {
-  const { sessionId, message, clientId } = data;
+function onTerminalCreate(data) {
+  const { sessionId, title } = data;
+  if (!sessionId) return;
 
-  if (!sessionId || !message) {
-    console.warn('⚠  Invalid chat message (missing sessionId or message)');
+  // 已存在则直接回报，不重复创建
+  if (sessionManager.getSession(sessionId)) {
+    const s = sessionManager.getSession(sessionId);
+    send({ type: 'terminal_created', sessionId, title: s.title, cwd: s.cwd, pid: s.pid, status: s.status });
+    reportSessions();
     return;
   }
 
-  console.log(`💬 [${sessionId.slice(0, 8)}] New message: "${message.slice(0, 80)}${message.length > 80 ? '...' : ''}"`);
-
-  // Handle /clear command — reset conversation history
-  if (message.trim() === '/clear') {
-    if (activeProcesses.has(sessionId)) {
-      activeProcesses.get(sessionId).history = [];
-      activeProcesses.get(sessionId).queue = [];
-    }
-    console.log(`   🧹 Cleared history for session ${sessionId.slice(0, 8)}`);
-    send({
-      type: 'status',
-      sessionId,
-      status: 'done',
-      message: 'Conversation cleared'
+  try {
+    const session = sessionManager.createSession(sessionId, title || '新会话', {
+      onData: (sid, chunk) => send({ type: 'terminal_output', sessionId: sid, data: chunk }),
+      onExit: (sid, evt) => {
+        send({ type: 'terminal_exit', sessionId: sid, exitCode: evt.exitCode, signal: evt.signal });
+        reportSessions();
+      },
     });
+    send({
+      type: 'terminal_created',
+      sessionId,
+      title: session.title,
+      cwd: session.cwd,
+      pid: session.pid,
+      status: session.status,
+    });
+    reportSessions();
+  } catch (err) {
+    console.error('❌ 创建终端失败:', err.message);
+    send({ type: 'terminal_error', sessionId, message: `创建终端失败: ${err.message}` });
+  }
+}
+
+// ─── 旧聊天协议（claude -p, stream-json）─────────────────────────
+function handleChatMessage(data) {
+  const { sessionId, message } = data;
+  if (!sessionId || !message) return;
+
+  if (message.trim() === '/clear') {
+    if (chatProcesses.has(sessionId)) {
+      chatProcesses.get(sessionId).history = [];
+      chatProcesses.get(sessionId).queue = [];
+    }
+    send({ type: 'status', sessionId, status: 'done', message: 'Conversation cleared' });
     return;
   }
 
-  // Check if there's already a process for this session
-  if (activeProcesses.has(sessionId)) {
-    const session = activeProcesses.get(sessionId);
-    if (session.proc) {
-      // Process is running, queue the message
-      session.queue.push({ message, clientId });
-      console.log(`   ⏳ Queued (process running for this session)`);
-      return;
-    }
+  if (chatProcesses.has(sessionId) && chatProcesses.get(sessionId).proc) {
+    chatProcesses.get(sessionId).queue.push({ message });
+    return;
   }
-
-  // Start processing
   runClaudeProcess(sessionId, message);
 }
 
-// ─── Claude Process Management ───────────────────────────────────
 function runClaudeProcess(sessionId, message) {
-  // Initialize session tracking
-  if (!activeProcesses.has(sessionId)) {
-    activeProcesses.set(sessionId, { proc: null, queue: [], history: [] });
+  if (!chatProcesses.has(sessionId)) {
+    chatProcesses.set(sessionId, { proc: null, queue: [], history: [] });
   }
+  const session = chatProcesses.get(sessionId);
+  send({ type: 'status', sessionId, status: 'thinking' });
 
-  const session = activeProcesses.get(sessionId);
+  const args = ['-p', '--verbose', '--output-format', 'stream-json', '--dangerously-skip-permissions'];
 
-  // Send "thinking" status
-  send({
-    type: 'status',
-    sessionId,
-    status: 'thinking'
-  });
-
-  const args = [
-    '-p',
-    '--verbose',
-    '--output-format', 'stream-json',
-    '--dangerously-skip-permissions',   // 跳过所有权限确认
-  ];
-
-  // Build conversation context from history
   let prompt = message;
   if (session.history.length > 0) {
     const parts = ['Previous conversation:\n'];
     for (const turn of session.history) {
       parts.push(`User: ${turn.user}`);
-      if (turn.assistant) {
-        parts.push(`Assistant: ${turn.assistant}`);
-      }
+      if (turn.assistant) parts.push(`Assistant: ${turn.assistant}`);
     }
-    parts.push('\n---\n');
-    parts.push(`User's latest message: ${message}`);
+    parts.push('\n---\n', `User's latest message: ${message}`);
     prompt = parts.join('\n');
   }
 
-  console.log(`   🚀 [${new Date().toLocaleTimeString()}] Starting: claude ${args.join(' ')} (history: ${session.history.length} turns)`);
-
-  const proc = spawn('claude', args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
-  });
-
-  activeProcesses.get(sessionId).proc = proc;
+  const proc = spawn('claude', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env } });
+  session.proc = proc;
 
   let buffer = '';
-  let closed = false;  // Guard against double-close (error + close both fire)
-  let lastResult = null;  // Track the final result text for conversation history
+  let closed = false;
+  let lastResult = null;
 
   function finalize(exitCode, isError, errorMsg) {
-    // Prevent double-processing: error + close both fire for the same process
     if (closed) return;
     closed = true;
-
     clearTimeout(timeout);
 
-    // Process remaining buffer
     if (buffer.trim()) {
       try {
         const event = JSON.parse(buffer);
         send({ type: 'stream', sessionId, event });
-        if (event.type === 'result' && event.result) {
-          lastResult = event.result;
-        }
+        if (event.type === 'result' && event.result) lastResult = event.result;
       } catch { /* ignore */ }
     }
 
-    // Append to conversation history
     if (lastResult && !isError) {
-      const session = activeProcesses.get(sessionId);
-      if (session) {
-        session.history.push({
-          user: message,
-          assistant: lastResult
-        });
-        // Keep history bounded (last 50 turns)
-        if (session.history.length > 50) {
-          session.history = session.history.slice(-50);
-        }
-      }
+      session.history.push({ user: message, assistant: lastResult });
+      if (session.history.length > 50) session.history = session.history.slice(-50);
     }
 
-    if (isError) {
-      console.error(`   ❌ [${new Date().toLocaleTimeString()}] Process error: ${errorMsg}`);
-    } else {
-      console.log(`   ✅ [${new Date().toLocaleTimeString()}] Process exited (code: ${exitCode}) for session ${sessionId.slice(0, 8)}`);
-    }
+    send({ type: 'status', sessionId, status: isError ? 'error' : 'done', exitCode, message: isError ? errorMsg : undefined });
 
-    // Notify browsers that streaming is done
-    send({
-      type: 'status',
-      sessionId,
-      status: isError ? 'error' : 'done',
-      exitCode: exitCode,
-      message: isError ? errorMsg : undefined
-    });
-
-    // Clean up process reference and process next queued message
-    const session = activeProcesses.get(sessionId);
-    if (session) {
-      session.proc = null;
-      if (session.queue.length > 0) {
-        const next = session.queue.shift();
-        console.log(`   ▶ [${new Date().toLocaleTimeString()}] Processing queued message for session ${sessionId.slice(0, 8)}`);
-        // Use setImmediate to avoid deep recursion if many queued messages
-        setImmediate(() => runClaudeProcess(sessionId, next.message));
-        return;
-      }
+    session.proc = null;
+    if (session.queue.length > 0) {
+      const next = session.queue.shift();
+      setImmediate(() => runClaudeProcess(sessionId, next.message));
     }
   }
 
@@ -287,102 +291,54 @@ function runClaudeProcess(sessionId, message) {
     buffer += chunk.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
-
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
         send({ type: 'stream', sessionId, event });
-        // Capture the final result text for conversation history
-        if (event.type === 'result' && event.result) {
-          lastResult = event.result;
-        }
-      } catch {
-        console.warn(`   ⚠  Non-JSON output: ${line.slice(0, 100)}`);
-      }
+        if (event.type === 'result' && event.result) lastResult = event.result;
+      } catch { /* non-JSON */ }
     }
   });
-
-  proc.stderr.on('data', (chunk) => {
-    console.error(`   📝 stderr: ${chunk.toString().trim()}`);
-  });
-
-  proc.on('close', (code) => {
-    finalize(code, false, null);
-  });
-
-  proc.on('error', (err) => {
-    finalize(-1, true, `Failed to start Claude: ${err.message}`);
-  });
-
-  // Write the message to stdin with error handling
-  proc.stdin.on('error', (err) => {
-    console.error(`   ❌ stdin error: ${err.message}`);
-    // If stdin fails, the process will exit on its own → close handler fires
-  });
-
-  const written = proc.stdin.write(prompt + '\n');
+  proc.stderr.on('data', (chunk) => console.error(`   📝 stderr: ${chunk.toString().trim()}`));
+  proc.on('close', (code) => finalize(code, false, null));
+  proc.on('error', (err) => finalize(-1, true, `Failed to start Claude: ${err.message}`));
+  proc.stdin.on('error', () => {});
+  proc.stdin.write(prompt + '\n');
   proc.stdin.end();
 
-  if (!written) {
-    console.warn(`   ⚠  stdin buffer full, waiting for drain...`);
-  }
-
-  // Set a timeout (5 minutes)
   const timeout = setTimeout(() => {
     if (proc.exitCode === null) {
-      console.warn(`   ⏰ Timeout for session ${sessionId.slice(0, 8)}, killing process`);
       proc.kill('SIGTERM');
-      setTimeout(() => {
-        if (proc.exitCode === null) proc.kill('SIGKILL');
-      }, 5000);
+      setTimeout(() => { if (proc.exitCode === null) proc.kill('SIGKILL'); }, 5000);
     }
   }, 5 * 60 * 1000);
 }
 
-// ─── Heartbeat ───────────────────────────────────────────────────
+// ─── 心跳 ───────────────────────────────────────────────────────
 setInterval(() => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'ping' }));
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
 }, 30000);
 
-// ─── Periodic Status Report ──────────────────────────────────────
-setInterval(() => {
-  const activeCount = [...activeProcesses.values()].filter(s => s.proc !== null).length;
-  const queuedCount = [...activeProcesses.values()]
-    .reduce((sum, s) => sum + s.queue.length, 0);
-  if (activeCount > 0 || queuedCount > 0) {
-    console.log(`📊 Active processes: ${activeCount}, Queued messages: ${queuedCount}`);
-  }
-}, 60000);
-
-// ─── Start ───────────────────────────────────────────────────────
+// ─── 启动 ───────────────────────────────────────────────────────
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
-console.log('║      Claude Web Agent 🤖                 ║');
-console.log(`║  Server: ${SERVER_URL.padEnd(34)}║`);
-console.log('║  Mode: Claude Code (stream-json)         ║');
+console.log('║         Claude Web Agent 🤖              ║');
+console.log(`║  Server : ${SERVER_URL.padEnd(32)}║`);
+console.log('║  Mode   : 交互式终端 (node-pty)           ║');
+console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
 
 connect();
 
-// ─── Graceful Shutdown ───────────────────────────────────────────
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down agent...');
-
-  // Kill all running Claude processes
-  for (const [sessionId, session] of activeProcesses) {
-    if (session.proc) {
-      console.log(`   Killing process for session ${sessionId.slice(0, 8)}`);
-      session.proc.kill('SIGTERM');
-    }
-  }
-
-  if (ws) {
-    ws.close(1000, 'Agent shutting down');
-  }
-
+// ─── 优雅关闭 ───────────────────────────────────────────────────
+function shutdown() {
+  console.log('\n🛑 正在关闭 Agent...');
+  sessionManager.destroyAllSessions();
+  for (const [, s] of chatProcesses) if (s.proc) s.proc.kill('SIGTERM');
+  if (ws) ws.close(1000, 'Agent shutting down');
   process.exit(0);
-});
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
