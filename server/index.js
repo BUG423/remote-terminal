@@ -98,6 +98,11 @@ wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
   console.log(`🔗 新连接: ${clientId} from ${req.socket.remoteAddress}`);
 
+  // 死连接检测：协议层 ping/pong + TCP keepalive
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  try { req.socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
+
   let authenticated = false;
   let clientType = null; // 'browser' | 'agent'
 
@@ -109,6 +114,7 @@ wss.on('connection', (ws, req) => {
   }, 10000);
 
   ws.on('message', (raw) => {
+    ws.isAlive = true; // 收到任何消息都说明连接存活
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -237,10 +243,21 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (err) => console.error(`⚠  WS 错误 ${clientId}:`, err.message));
 });
 
-// ─── 清理失活浏览器 ─────────────────────────────────────────────
+// ─── 心跳 + 死连接清理 ──────────────────────────────────────────
+// 主动 ping 所有连接，上一轮没回 pong 的判定为死连接并 terminate()，
+// 从而及时发现掉线的 Agent/浏览器（避免 half-open 僵尸连接长期占用）。
 setInterval(() => {
-  for (const [id, ws] of browserClients) {
-    if (ws.readyState !== 1) browserClients.delete(id);
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch { /* ignore */ }
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch { /* ignore */ }
+  }
+  // 顺带清理已关闭的浏览器引用
+  for (const [id, b] of browserClients) {
+    if (b.readyState !== 1) browserClients.delete(id);
   }
 }, 30000);
 

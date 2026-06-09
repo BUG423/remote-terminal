@@ -57,7 +57,10 @@ const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
 let ws = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
+let lastPongAt = 0;        // 最近一次收到服务器 pong 的时间戳
 const MAX_RECONNECT_DELAY = 30000;
+const HEARTBEAT_MS = Number(process.env.CW_HEARTBEAT_MS) || 25000;       // 每 25s 发一次心跳
+const PONG_TIMEOUT_MS = Number(process.env.CW_PONG_TIMEOUT_MS) || 70000; // 超过 70s 没收到任何 pong → 判定连接已死
 
 // 旧聊天协议：每会话的 claude 进程
 const chatProcesses = new Map(); // sessionId -> { proc, queue, history }
@@ -70,8 +73,14 @@ function connect() {
   ws.on('open', () => {
     console.log('✅ 已连接到服务器');
     reconnectAttempts = 0;
+    lastPongAt = Date.now();
+    // 开启 TCP keepalive，让操作系统也能较快发现死链
+    try { ws._socket && ws._socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
     ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
   });
+
+  // 协议层 pong（服务器若用 ws.ping() 探测，这里自动回应并记录存活）
+  ws.on('pong', () => { lastPongAt = Date.now(); });
 
   ws.on('message', (raw) => {
     let data;
@@ -208,6 +217,7 @@ function handleMessage(data) {
       break;
 
     case 'pong':
+      lastPongAt = Date.now();
       break;
 
     default:
@@ -354,10 +364,27 @@ function runClaudeProcess(sessionId, message) {
   }, 5 * 60 * 1000);
 }
 
-// ─── 心跳 ───────────────────────────────────────────────────────
+// ─── 心跳 + 死连接检测 ──────────────────────────────────────────
+// half-open（半开）连接：TCP 一侧已死但本端 ws 不触发 close，导致永不重连。
+// 这里主动发心跳并校验 pong：若超过 PONG_TIMEOUT_MS 没收到任何 pong，
+// 判定连接已死，主动 terminate() 触发 close → 走正常重连流程（PTY 会话因进程
+// 存活而保留，重连后自动重新上报，无需重建）。
 setInterval(() => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
-}, 30000);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  // 死连接判定：长时间没有任何 pong
+  if (lastPongAt && Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+    console.warn(`⚠  超过 ${PONG_TIMEOUT_MS / 1000}s 未收到服务器响应，判定连接已死，强制重连`);
+    try { ws.terminate(); } catch { /* ignore */ }  // 立即触发 close → scheduleReconnect
+    return;
+  }
+
+  // 同时发应用层 ping 和协议层 ping（任一条回应都会刷新 lastPongAt）
+  try {
+    ws.send(JSON.stringify({ type: 'ping' }));
+    ws.ping();
+  } catch { /* 发送失败说明链路有问题，下个周期会被超时逻辑兜底 */ }
+}, HEARTBEAT_MS);
 
 // ─── 启动 ───────────────────────────────────────────────────────
 console.log('');
