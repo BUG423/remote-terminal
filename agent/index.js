@@ -5,7 +5,7 @@
  * 职责：
  *   - 连接云服务器（带自动重连）
  *   - 管理多个交互式终端会话（创建 / 输入 / resize / 删除）
- *   - 每个会话绑定一个独立工作目录
+ *   - 每个会话在共享的工作区根目录下启动
  *   - 兼容旧的 Claude Code 聊天协议（chat / stream-json）
  * ═══════════════════════════════════════════════════════════════
  */
@@ -16,6 +16,7 @@ const fs = require('fs');
 const os = require('os');
 const WebSocket = require('ws');
 const sessionManager = require('./session-manager');
+const auditLog = require('./audit-log');
 
 // ─── 配置 ───────────────────────────────────────────────────────
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
@@ -39,13 +40,17 @@ try {
   } catch { /* 无 .env 文件则忽略 */ }
 })();
 
-// token 优先级：环境变量 > config.json
-config.token = process.env.CLAUDE_WEB_TOKEN || config.token;
+// token 优先级：环境变量 > config.tokens（取第一个） > config.token（兼容旧版）
+if (process.env.CLAUDE_WEB_TOKEN) {
+  config.token = process.env.CLAUDE_WEB_TOKEN;
+} else if (!config.token && config.tokens) {
+  config.token = Object.keys(config.tokens)[0];
+}
 
 const {
   token,
   serverHost,
-  serverPort = 3000,
+  serverPort = 3002,
   useTLS = false,
   workspaceRoot,
 } = config;
@@ -184,6 +189,8 @@ function handleMessage(data) {
       const session = sessionManager.getSession(data.sessionId);
       if (session && session.status === 'running') {
         session.terminal.write(data.data);
+        // 审计日志：记录用户输入（仅 Enter 结束时写入完整命令行）
+        auditLog.feed(data.sessionId, session.title, data.data);
       } else {
         send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在或已退出，请重新创建会话' });
       }
@@ -200,6 +207,7 @@ function handleMessage(data) {
     // ── 终端：删除 ────────────────────────────────────────────
     case 'terminal_delete': {
       dropOutputBuffer(data.sessionId);
+      auditLog.clearSession(data.sessionId);
       sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
       send({ type: 'terminal_closed', sessionId: data.sessionId });
       reportSessions();
@@ -393,6 +401,7 @@ console.log('║         Claude Web Agent 🤖              ║');
 console.log(`║  Server : ${SERVER_URL.padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
+console.log(`║  📝 审计 : ${auditLog.logPath().slice(0, 30).padEnd(30)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
 

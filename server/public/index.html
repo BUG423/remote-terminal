@@ -47,6 +47,7 @@
           <span id="active-cwd" class="cwd"></span>
         </div>
         <div class="th-right">
+          <button id="tile-view-btn" title="分屏显示多个终端" disabled>📐 分屏</button>
           <span id="active-status" class="badge"></span>
           <button id="delete-session-btn" class="danger" title="删除当前会话" disabled>删除</button>
         </div>
@@ -64,11 +65,7 @@
   <div id="delete-modal" class="modal hidden">
     <div class="modal-card">
       <h3>删除会话</h3>
-      <p id="delete-modal-text">确认删除该会话？</p>
-      <label class="checkbox">
-        <input type="checkbox" id="delete-files-checkbox">
-        同时删除工作目录下的所有文件（不可恢复）
-      </label>
+      <p id="delete-modal-text">确认删除该会话？终端进程将被终止。</p>
       <div class="modal-actions">
         <button id="delete-cancel" class="ghost">取消</button>
         <button id="delete-confirm" class="danger">删除</button>

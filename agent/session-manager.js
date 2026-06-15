@@ -1,12 +1,12 @@
 /**
  * ═══════════════════════════════════════════════════════════════
  * Claude Web — 会话管理器
- * 管理所有终端会话的生命周期，并把每个会话绑定到一个独立的工作目录。
+ * 管理所有终端会话的生命周期。
+ * 所有会话共享 WORKSPACE_ROOT 作为起始目录，用户可在终端中自行创建文件夹。
  *
  *   Map<sessionId, Session>
  *
- * 安全边界：所有会话工作目录都被强制限制在 WORKSPACE_ROOT 之下，
- * 会话标题经过清洗以防止路径穿越（`../`、绝对路径等）。
+ * 安全边界：所有会话起始目录被强制限制在 WORKSPACE_ROOT 之下。
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -29,45 +29,9 @@ function setWorkspaceRoot(root) {
 }
 
 /**
- * 把任意标题清洗成安全的目录名（防止路径穿越）。
- * 仅保留字母、数字、中文、`-`、`_`、`.`、空格，并去掉首尾的点/空格。
- */
-function safeDirName(title) {
-  const cleaned = String(title || '')
-    .replace(/[\\/]+/g, '-')          // 斜杠 → 连字符
-    .replace(/\.{2,}/g, '.')          // 折叠多个点，杀掉 ..
-    .replace(/[^\w一-龥.\- ]/g, '') // 仅允许安全字符
-    .replace(/^[.\s]+|[.\s]+$/g, '')  // 去掉首尾点/空格
-    .trim();
-  return cleaned || 'session';
-}
-
-/**
- * 为会话解析工作目录，并确保它严格位于 WORKSPACE_ROOT 之内。
- * 若发生冲突则追加短 id 后缀。
- */
-function resolveWorkspaceDir(sessionId, title) {
-  const base = safeDirName(title);
-  let dir = path.join(WORKSPACE_ROOT, base);
-
-  // 二次校验：解析后必须仍在根目录内
-  const rel = path.relative(WORKSPACE_ROOT, dir);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    dir = path.join(WORKSPACE_ROOT, sessionId.slice(0, 8));
-  }
-
-  // 目录名冲突 → 追加 sessionId 短前缀
-  if (fs.existsSync(dir)) {
-    const owner = [...sessions.values()].find((s) => s.cwd === dir);
-    if (!owner || owner.id !== sessionId) {
-      dir = `${dir}-${sessionId.slice(0, 6)}`;
-    }
-  }
-  return dir;
-}
-
-/**
- * 创建一个新的终端会话（含独立工作目录）。
+ * 创建一个新的终端会话。
+ * 所有会话共享同一个工作区根目录（不创建独立子目录），
+ * 用户可在终端中自行 mkdir 创建文件夹。
  * @returns {Session}
  */
 function createSession(sessionId, title, callbacks = {}) {
@@ -77,8 +41,8 @@ function createSession(sessionId, title, callbacks = {}) {
     destroySession(sessionId);
   }
 
-  const cwd = resolveWorkspaceDir(sessionId, title);
-  fs.mkdirSync(cwd, { recursive: true });
+  // 所有会话共用 WORKSPACE_ROOT 作为起始目录，不创建独立子目录
+  const cwd = WORKSPACE_ROOT;
 
   const terminal = createTerminal({
     sessionId,
@@ -93,7 +57,7 @@ function createSession(sessionId, title, callbacks = {}) {
 
   const session = {
     id: sessionId,
-    title: title || safeDirName(title),
+    title: title || '新会话',
     cwd,
     pid: terminal.pid,
     status: 'running',
@@ -122,29 +86,17 @@ function destroySession(sessionId) {
 }
 
 /**
- * 删除会话，并按策略处理工作目录。
- * @param {boolean} deleteFiles 是否连同工作目录一起删除
+ * 删除会话。会话不再拥有独立工作目录，因此 deleteFiles 参数
+ * 仅作为保留字段（前端可能仍发送），实际不会删除任何目录。
+ * @param {boolean} deleteFiles 已废弃——会话不再绑定独立目录，此参数无效果
  */
 function deleteSession(sessionId, deleteFiles) {
   const session = sessions.get(sessionId);
-  const cwd = session ? session.cwd : null;
   destroySession(sessionId);
 
-  if (deleteFiles && cwd) {
-    // 安全护栏：只允许删除 WORKSPACE_ROOT 之内的目录
-    const rel = path.relative(WORKSPACE_ROOT, cwd);
-    if (!rel.startsWith('..') && !path.isAbsolute(rel) && rel !== '') {
-      try {
-        fs.rmSync(cwd, { recursive: true, force: true });
-        console.log(`🧹 工作目录已删除: ${cwd}`);
-      } catch (err) {
-        console.error(`❌ 删除目录失败 [${cwd}]: ${err.message}`);
-      }
-    } else {
-      console.warn(`⚠  拒绝删除越界目录: ${cwd}`);
-    }
-  } else if (cwd) {
-    console.log(`📁 工作目录已保留: ${cwd}`);
+  // 会话不再拥有独立工作目录，永远不删除 WORKSPACE_ROOT
+  if (deleteFiles) {
+    console.log(`📁 会话无独立目录，跳过删除 (cwd=${session?.cwd || 'unknown'})`);
   }
 }
 

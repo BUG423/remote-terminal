@@ -14,8 +14,14 @@ const path = require('path');
 const WebSocket = require(path.join(__dirname, '..', 'agent', 'node_modules', 'ws'));
 
 let token = process.env.CLAUDE_WEB_TOKEN;
-try { if (!token) token = require('../config.json').token; } catch {}
-const TARGET = process.env.TARGET || 'ws://127.0.0.1:3000';
+try {
+  if (!token) {
+    const cfg = require('../config.json');
+    // 优先从多 Token 配置取第一个，兼容旧单 token
+    token = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
+  }
+} catch {}
+const TARGET = process.env.TARGET || 'ws://127.0.0.1:3002';
 
 const uuid = () => require('crypto').randomUUID();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -117,20 +123,23 @@ function check(name, cond, detail = '') {
   await c.type(A, 'echo hello'); await c.waitIdle(A);
   const ta = c.terms.get(A);
   check('3. 创建会话成功且列表含该会话', c.sessions.some((s) => s.id === A));
-  check('4. pwd 输出包含会话工作目录(含 e2e-A)', /e2e-A/.test(ta.buf), 'workspacePath 绑定');
+  check('4. pwd 输出包含 WebClaudeWorkspaces 工作区根目录', /WebClaudeWorkspaces/.test(ta.buf), 'workspaceRoot 起始目录');
   check('5. echo hello 输出含 hello', /hello/.test(ta.buf));
   check('6. 双倍回显检查: "hello" 计数=2 (命令行回显1+输出1)', ta.count('hello') === 2, `实际=${ta.count('hello')}`);
 
-  // ── 多会话隔离 ──
+  // ── 多会话共享目录 ──
   const B = await c.create('e2e-B'); await c.waitIdle(B);
   await c.type(B, 'echo SESSION_B_ONLY > bfile.txt'); await c.waitIdle(B);
-  await c.type(B, 'ls'); await c.waitIdle(B);
   await c.attach(A); await c.waitIdle(A);
   await c.type(A, 'echo SESSION_A_ONLY > afile.txt'); await c.waitIdle(A);
   await c.type(A, 'ls'); await c.waitIdle(A);
-  const a2 = c.terms.get(A), b2 = c.terms.get(B);
-  check('7. 会话隔离: A 看不到 B 的文件 bfile.txt', !/bfile\.txt/.test(a2.buf.slice(a2.buf.lastIndexOf('afile'))) || !a2.buf.includes('bfile.txt'));
-  check('8. 会话隔离: B 看不到 A 的文件 afile.txt', !b2.buf.includes('afile.txt'));
+  const a2 = c.terms.get(A);
+  check('7. 共享目录: A 可以看到 B 创建的 bfile.txt', /bfile\.txt/.test(a2.buf), '共享 WORKSPACE_ROOT');
+  // 切回 B 再 ls，验证 B 也能看到 A 创建的文件
+  await c.attach(B); await c.waitIdle(B);
+  await c.type(B, 'ls'); await c.waitIdle(B);
+  const b2 = c.terms.get(B);
+  check('8. 共享目录: B 可以看到 A 创建的 afile.txt', /afile\.txt/.test(b2.buf), '共享 WORKSPACE_ROOT');
 
   // ── 反复切换 A/B 10 次，每次执行命令 ──
   let switchOk = true;
@@ -141,7 +150,7 @@ function check(name, cond, detail = '') {
     if (c.terms.get(id).count(tag) < 1) switchOk = false;
   }
   check('9. 反复切换 A/B 共10次，每次都能在当前会话执行命令', switchOk);
-  check('10. 切回 A 后历史仍在 (含早先 SESSION_A_ONLY 写入痕迹)', /e2e-A/.test(c.terms.get(A).buf));
+  check('10. 切回 A 后历史仍在 (含早先 SESSION_A_ONLY 写入痕迹)', /SESSION_A_ONLY/.test(c.terms.get(A).buf));
 
   // ── 刷新页面（断开重连，重新 attach）──
   c.close(); await sleep(500);

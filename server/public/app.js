@@ -9,8 +9,10 @@ const STATE = {
   clientId: null,
   authenticated: false,
   agentOnline: false,
-  sessions: [],          // [{ id, title, cwd, pid, status, createdAt }]
+  agentName: '',          // 当前连接的 Agent 名称
+  sessions: [],           // [{ id, title, cwd, pid, status, createdAt }]
   activeId: null,
+  splitMode: false,       // 分屏模式：同时显示多个终端
   reconnectAttempts: 0,
   maxReconnect: 10,
 };
@@ -38,7 +40,7 @@ const activeStatus = $('active-status');
 const deleteBtn = $('delete-session-btn');
 const deleteModal = $('delete-modal');
 const deleteModalText = $('delete-modal-text');
-const deleteFilesCheckbox = $('delete-files-checkbox');
+const tileViewBtn = $('tile-view-btn');
 
 // ── 工具 ───────────────────────────────────────────────────────
 function uuid() {
@@ -100,13 +102,13 @@ function handleMessage(data) {
       STATE.authenticated = true;
       STATE.clientId = data.clientId;
       STATE.agentOnline = data.agentOnline;
+      STATE.agentName = data.agentName || '';
       STATE.sessions = data.sessions || [];
       showMain();
       renderSessionList();
       updateAgentStatus();
-      // 重连：对所有已存在的终端重新 attach（重置 + 回放，避免漏输出/重复）
+      // 重连：对所有已存在的终端重新 attach
       resyncTerminals();
-      // 自动选中上次会话或第一个
       restoreActive();
       break;
 
@@ -116,6 +118,7 @@ function handleMessage(data) {
 
     case 'agent_status':
       STATE.agentOnline = data.online;
+      if (data.agentName) STATE.agentName = data.agentName;
       updateAgentStatus();
       break;
 
@@ -124,12 +127,14 @@ function handleMessage(data) {
       renderSessionList();
       reconcileTerminals();
       updateActiveHeader();
+      if (STATE.splitMode) refreshTileView();
       break;
 
     case 'terminal_created':
       upsertSession({ id: data.sessionId, title: data.title, cwd: data.cwd, pid: data.pid, status: data.status });
       renderSessionList();
       selectSession(data.sessionId);
+      if (STATE.splitMode) refreshTileView();
       break;
 
     case 'terminal_output':
@@ -150,6 +155,7 @@ function handleMessage(data) {
 
     case 'terminal_closed':
       removeSession(data.sessionId);
+      if (STATE.splitMode) refreshTileView();
       break;
 
     case 'terminal_error':
@@ -218,6 +224,23 @@ function ensureTerminal(sessionId) {
   // 键入 → 发送到 Agent
   term.onData((d) => sendWS({ type: 'terminal_input', sessionId, data: d }));
 
+  // Ctrl+V / Cmd+V: 拦截浏览器默认粘贴行为。
+  // 浏览器默认 Ctrl+V 会尝试粘贴富文本/图片（剪贴板里有啥就塞啥），
+  // 导致终端里出现乱码或图片路径。这里改为读取纯文本再发送。
+  term.attachCustomKeyEventHandler((e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v' && e.type === 'keydown') {
+      // 如果用户明确按了 Ctrl+Shift+V，走浏览器原生纯文本粘贴（更可靠）
+      if (e.shiftKey) return true;
+      navigator.clipboard.readText().then((text) => {
+        if (text) sendWS({ type: 'terminal_input', sessionId, data: text });
+      }).catch(() => {
+        // clipboard API 不可用（如 HTTP 环境），静默回退
+      });
+      return false; // 阻止浏览器默认的富文本粘贴
+    }
+    return true;
+  });
+
   const entry = { term, fit, container, attached: false };
   terminals.set(sessionId, entry);
 
@@ -252,24 +275,121 @@ function selectSession(sessionId) {
   STATE.activeId = sessionId;
   localStorage.setItem('claude-web-active', sessionId);
 
-  emptyHint.style.display = 'none';
-  for (const [id, t] of terminals) {
-    t.container.style.display = id === sessionId ? 'block' : 'none';
+  if (STATE.splitMode) {
+    // 分屏模式：所有终端保持可见，仅高亮选中
+    refreshTileView();
+    const entry = terminals.get(sessionId);
+    if (entry) entry.term.focus();
+  } else {
+    // 单屏模式：只显示当前终端
+    emptyHint.style.display = 'none';
+    for (const [id, t] of terminals) {
+      t.container.style.display = id === sessionId ? 'block' : 'none';
+    }
+    const entry = ensureTerminal(sessionId);
+    entry.container.style.display = 'block';
+    requestAnimationFrame(() => {
+      try {
+        entry.fit.fit();
+        sendWS({ type: 'terminal_resize', sessionId, cols: entry.term.cols, rows: entry.term.rows });
+        entry.term.focus();
+      } catch {}
+    });
   }
-  const entry = ensureTerminal(sessionId);
-  entry.container.style.display = 'block';
-
-  // 让 xterm 适配容器并上报尺寸
-  requestAnimationFrame(() => {
-    try {
-      entry.fit.fit();
-      sendWS({ type: 'terminal_resize', sessionId, cols: entry.term.cols, rows: entry.term.rows });
-      entry.term.focus();
-    } catch {}
-  });
 
   renderSessionList();
   updateActiveHeader();
+}
+
+// ── 分屏模式 ────────────────────────────────────────────────────
+function toggleSplitView() {
+  STATE.splitMode = !STATE.splitMode;
+
+  if (STATE.splitMode) {
+    // 进入分屏：为所有非退出会话创建终端
+    tileViewBtn.classList.add('active');
+    tileViewBtn.textContent = '📐 单屏';
+    for (const s of STATE.sessions) {
+      if (s.status !== 'exited') {
+        ensureTerminal(s.id);
+      }
+    }
+    refreshTileView();
+  } else {
+    // 退出分屏：恢复单屏
+    tileViewBtn.classList.remove('active');
+    tileViewBtn.textContent = '📐 分屏';
+    terminalsEl.classList.remove('tiled');
+    // 隐藏所有终端，重新显示当前选中的
+    for (const [id, t] of terminals) {
+      t.container.style.display = 'none';
+      t.container.style.border = '';
+    }
+    emptyHint.style.display = 'none';
+    if (STATE.activeId) {
+      selectSession(STATE.activeId);
+    }
+  }
+}
+
+function refreshTileView() {
+  if (!STATE.splitMode) return;
+
+  // 显示所有会话（排除已退出的）
+  const visibleSessions = STATE.sessions.filter(
+    (s) => s.status !== 'exited'
+  );
+
+  if (visibleSessions.length === 0) {
+    terminalsEl.classList.remove('tiled');
+    emptyHint.style.display = '';
+    return;
+  }
+
+  terminalsEl.classList.add('tiled');
+  emptyHint.style.display = 'none';
+
+  // 动态列数：1个/2个=1列，3-4个=2列，5+个=3列
+  let cols = 1;
+  if (visibleSessions.length >= 5) cols = 3;
+  else if (visibleSessions.length >= 3) cols = 2;
+  terminalsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+
+  // 先为所有可见会话创建终端（如尚未创建）
+  for (const s of visibleSessions) {
+    ensureTerminal(s.id);
+  }
+
+  // 显示/隐藏对应的终端容器
+  for (const [id, t] of terminals) {
+    if (visibleSessions.some((s) => s.id === id)) {
+      t.container.style.display = 'block';
+      t.container.style.border = id === STATE.activeId
+        ? '1px solid var(--accent)'
+        : '1px solid var(--border)';
+    } else {
+      t.container.style.display = 'none';
+      t.container.style.border = '';
+    }
+  }
+
+  // 所有终端适配新尺寸
+  requestAnimationFrame(() => {
+    for (const s of visibleSessions) {
+      const entry = terminals.get(s.id);
+      if (entry && entry.container.style.display !== 'none') {
+        try {
+          entry.fit.fit();
+          sendWS({ type: 'terminal_resize', sessionId: s.id, cols: entry.term.cols, rows: entry.term.rows });
+        } catch {}
+      }
+    }
+  });
+}
+
+// 分屏模式下列表点击：选中 + 聚焦
+function onSessionClick(sessionId) {
+  selectSession(sessionId);
 }
 
 function restoreActive() {
@@ -282,7 +402,8 @@ function restoreActive() {
 // ── 新建 / 删除 ────────────────────────────────────────────────
 function newSession() {
   if (!STATE.agentOnline) return alert('⚠ Agent 离线，无法创建会话');
-  const title = (prompt('会话名称（将作为工作目录名）：', '会话-' + new Date().toLocaleTimeString().replace(/:/g, ''))) || '新会话';
+  const now = new Date();
+  const title = '会话-' + String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
   const id = uuid();
   sendWS({ type: 'terminal_create', sessionId: id, title });
 }
@@ -290,14 +411,13 @@ function newSession() {
 function openDeleteModal() {
   if (!STATE.activeId) return;
   const s = STATE.sessions.find((x) => x.id === STATE.activeId);
-  deleteModalText.textContent = `确认删除会话「${s ? s.title : ''}」？`;
-  deleteFilesCheckbox.checked = false;
+  deleteModalText.textContent = `确认删除会话「${s ? s.title : ''}」？终端进程将被终止。`;
   deleteModal.classList.remove('hidden');
 }
 function confirmDelete() {
   const id = STATE.activeId;
   if (!id) return;
-  sendWS({ type: 'terminal_delete', sessionId: id, deleteFiles: deleteFilesCheckbox.checked });
+  sendWS({ type: 'terminal_delete', sessionId: id });
   deleteModal.classList.add('hidden');
 }
 
@@ -321,6 +441,8 @@ function renderSessionList() {
 
 function updateActiveHeader() {
   const s = STATE.sessions.find((x) => x.id === STATE.activeId);
+  const hasSessions = STATE.sessions.length > 0;
+  tileViewBtn.disabled = !hasSessions;
   if (!s) {
     activeTitle.textContent = '未选择会话';
     activeCwd.textContent = '';
@@ -338,12 +460,13 @@ function updateActiveHeader() {
 }
 
 function updateAgentStatus() {
+  const name = STATE.agentName || 'Agent';
   if (STATE.agentOnline) {
     agentStatus.className = 'status-dot online';
-    agentLabel.textContent = 'Agent 在线';
+    agentLabel.textContent = name + ' 在线';
   } else {
     agentStatus.className = 'status-dot offline';
-    agentLabel.textContent = 'Agent 离线';
+    agentLabel.textContent = name + ' 离线';
   }
   newSessionBtn.disabled = !STATE.agentOnline;
 }
@@ -388,18 +511,31 @@ loginForm.addEventListener('submit', (e) => {
   connect();
 });
 newSessionBtn.addEventListener('click', newSession);
+tileViewBtn.addEventListener('click', toggleSplitView);
 deleteBtn.addEventListener('click', openDeleteModal);
 $('delete-cancel').addEventListener('click', () => deleteModal.classList.add('hidden'));
 $('delete-confirm').addEventListener('click', confirmDelete);
 
-// 窗口缩放时重新 fit 当前终端
+// 窗口缩放时重新 fit 可见终端
 window.addEventListener('resize', () => {
-  const t = terminals.get(STATE.activeId);
-  if (t && t.container.style.display !== 'none') {
-    try {
-      t.fit.fit();
-      sendWS({ type: 'terminal_resize', sessionId: STATE.activeId, cols: t.term.cols, rows: t.term.rows });
-    } catch {}
+  if (STATE.splitMode) {
+    // 分屏模式：所有可见终端都 resize
+    for (const [id, t] of terminals) {
+      if (t.container.style.display !== 'none') {
+        try {
+          t.fit.fit();
+          sendWS({ type: 'terminal_resize', sessionId: id, cols: t.term.cols, rows: t.term.rows });
+        } catch {}
+      }
+    }
+  } else {
+    const t = terminals.get(STATE.activeId);
+    if (t && t.container.style.display !== 'none') {
+      try {
+        t.fit.fit();
+        sendWS({ type: 'terminal_resize', sessionId: STATE.activeId, cols: t.term.cols, rows: t.term.rows });
+      } catch {}
+    }
   }
 });
 

@@ -117,9 +117,37 @@ body {
 .danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
 .danger:disabled { opacity: .4; cursor: not-allowed; }
 
+/* 分屏按钮 */
+#tile-view-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+  padding: 6px 12px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+#tile-view-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+#tile-view-btn.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+#tile-view-btn:disabled { opacity: .4; cursor: not-allowed; }
+
 #terminals { flex: 1; position: relative; background: #0d1117; overflow: hidden; }
 .term-container { position: absolute; inset: 0; padding: 8px; }
 .term-container .xterm { height: 100%; }
+
+/* 分屏模式：CSS Grid */
+#terminals.tiled {
+  display: grid;
+  gap: 2px;
+  background: var(--border);
+  overflow: auto;
+}
+#terminals.tiled .term-container {
+  position: relative;
+  inset: auto;
+  min-height: 200px;
+  background: #0d1117;
+}
+#terminals.tiled .empty-hint {
+  position: relative;
+  grid-column: 1 / -1;
+}
+/* 动态列数由 JS 设置 */
 
 .empty-hint {
   position: absolute; inset: 0; display: flex; flex-direction: column;
