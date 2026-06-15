@@ -55,7 +55,9 @@ const {
   workspaceRoot,
 } = config;
 
-const SERVER_URL = `${useTLS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
+// useTLS=false + Nginx 代理 → 通过 CW_USE_WSS=true 仍可用 WSS 连接
+const useWSS = useTLS || process.env.CW_USE_WSS === 'true';
+const SERVER_URL = `${useWSS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
 const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
 
 // ─── 状态 ───────────────────────────────────────────────────────

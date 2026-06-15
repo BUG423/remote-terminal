@@ -24,7 +24,7 @@
   "_serverPort_comment": "云服务器上 Nginx 对外暴露的端口。Agent 和浏览器都连接这个端口，Nginx 再反向代理到内部的 port (3002)。",
 
   "useTLS": false,
-  "_useTLS_comment": "【直连模式】是否由 Node.js 直接处理 TLS。生产环境推荐设为 false + 使用 Nginx 反向代理（参见 nginx/web-claude.conf）；本地测试可设为 true + scripts/generate-cert.sh 自签名证书。",
+  "_useTLS_comment": "【直连模式】是否由 Node.js 直接处理 TLS。Nginx 反向代理时设为 false，Agent 通过 CW_USE_WSS=true 环境变量启用 WSS。本地测试可设为 true + scripts/generate-cert.sh 自签名证书。",
 
   "tlsCertPath": "/etc/letsencrypt/live/your-domain.com/fullchain.pem",
   "tlsKeyPath": "/etc/letsencrypt/live/your-domain.com/privkey.pem",
