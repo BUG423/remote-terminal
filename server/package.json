@@ -1,0 +1,14 @@
+{
+  "name": "claude-web-server",
+  "version": "1.0.0",
+  "description": "WebSocket relay server for Claude Web — cloud side",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0",
+    "ws": "^8.18.0"
+  }
+}

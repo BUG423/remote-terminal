@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1a1a2e">
+  <title>Claude Web Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- ── 登录 ──────────────────────────────────────────────── -->
+  <div id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="login-icon">🖥️</div>
+      <h1>Claude Web Terminal</h1>
+      <p class="login-subtitle">远程控制你的本地终端</p>
+      <form id="login-form">
+        <label for="token-input">访问 Token</label>
+        <input type="password" id="token-input" placeholder="输入访问 Token..." autocomplete="off">
+        <button type="submit" id="login-btn">连接</button>
+      </form>
+      <p id="login-error" class="error-msg hidden"></p>
+    </div>
+  </div>
+
+  <!-- ── 主界面 ────────────────────────────────────────────── -->
+  <div id="main-screen" class="screen hidden">
+    <!-- 侧栏：会话列表 -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="brand">🖥️ Sessions</span>
+        <button id="new-session-btn" title="新建会话">＋</button>
+      </div>
+      <ul id="session-list"></ul>
+      <div class="sidebar-footer">
+        <span id="agent-status" class="status-dot offline"></span>
+        <span id="agent-label">Agent 离线</span>
+      </div>
+    </aside>
+
+    <!-- 主区：终端 -->
+    <main id="workspace">
+      <header id="terminal-header">
+        <div class="th-left">
+          <span id="active-title">未选择会话</span>
+          <span id="active-cwd" class="cwd"></span>
+        </div>
+        <div class="th-right">
+          <button id="tile-view-btn" title="分屏显示多个终端" disabled>📐 分屏</button>
+          <span id="active-status" class="badge"></span>
+          <button id="delete-session-btn" class="danger" title="删除当前会话" disabled>删除</button>
+        </div>
+      </header>
+      <div id="terminals">
+        <div id="empty-hint" class="empty-hint">
+          <div class="empty-icon">⌨️</div>
+          <p>点击左上角 ＋ 新建一个会话，开始在浏览器中操作本地终端</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 删除确认弹窗 -->
+  <div id="delete-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>删除会话</h3>
+      <p id="delete-modal-text">确认删除该会话？终端进程将被终止。</p>
+      <div class="modal-actions">
+        <button id="delete-cancel" class="ghost">取消</button>
+        <button id="delete-confirm" class="danger">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 脚本 ──────────────────────────────────────────────── -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
