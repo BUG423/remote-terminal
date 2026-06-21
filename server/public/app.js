@@ -222,16 +222,7 @@ function ensureTerminal(sessionId) {
   term.open(container);
 
   // 键入 → 发送到 Agent
-  // 去重机制：豆包等第三方输入工具会同时触发 paste 事件（xterm.js → onData）
-  // 和模拟键盘事件（attachCustomKeyEventHandler → clipboard API），
-  // 导致同一文本发送两次。这里用一个统一的发送函数，300ms 内相同文本只发一次。
-  let _lastSent = '', _lastTime = 0;
-  const _sendInput = (text) => {
-    if (text === _lastSent && Date.now() - _lastTime < 300) return;
-    _lastSent = text; _lastTime = Date.now();
-    sendWS({ type: 'terminal_input', sessionId, data: text });
-  };
-  term.onData((d) => _sendInput(d));
+  term.onData((d) => sendWS({ type: 'terminal_input', sessionId, data: d }));
 
   // Ctrl+V / Cmd+V: 拦截浏览器默认粘贴行为。
   // 浏览器默认 Ctrl+V 会尝试粘贴富文本/图片（剪贴板里有啥就塞啥），
@@ -241,7 +232,7 @@ function ensureTerminal(sessionId) {
       // 如果用户明确按了 Ctrl+Shift+V，走浏览器原生纯文本粘贴（更可靠）
       if (e.shiftKey) return true;
       navigator.clipboard.readText().then((text) => {
-        if (text) _sendInput(text);
+        if (text) sendWS({ type: 'terminal_input', sessionId, data: text });
       }).catch(() => {
         // clipboard API 不可用（如 HTTP 环境），静默回退
       });
