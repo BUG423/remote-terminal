@@ -222,19 +222,32 @@ function ensureTerminal(sessionId) {
   term.open(container);
 
   // 键入 → 发送到 Agent
-  term.onData((d) => sendWS({ type: 'terminal_input', sessionId, data: d }));
+  // 去重机制：豆包等第三方输入工具会同时触发 paste 事件（xterm.js → onData）
+  // 和模拟键盘事件（attachCustomKeyEventHandler → clipboard API），
+  // 导致同一文本发送两次。这里用一个统一的发送函数，300ms 内相同文本只发一次。
+  let _lastSent = '', _lastTime = 0;
+  const _sendInput = (text) => {
+    if (text === _lastSent && Date.now() - _lastTime < 300) return;
+    _lastSent = text; _lastTime = Date.now();
+    sendWS({ type: 'terminal_input', sessionId, data: text });
+  };
+  term.onData((d) => _sendInput(d));
 
-  // 粘贴处理：统一通过 paste 事件，确保只发送一次。
-  // attachCustomKeyEventHandler 方式会导致豆包等第三方输入工具的双重输入问题：
-  //   豆包可能先触发 paste 事件（xterm.js 内部处理），再模拟 Ctrl+V 按键
-  //   （被 attachCustomKeyEventHandler 捕获），造成同一文本发送两次。
-  // 改为监听 paste 事件，e.preventDefault() 阻止 xterm.js 默认处理，
-  // 自己从剪贴板读取纯文本，只发送一次。
-  term.textarea.addEventListener('paste', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const text = e.clipboardData.getData('text/plain');
-    if (text) sendWS({ type: 'terminal_input', sessionId, data: text });
+  // Ctrl+V / Cmd+V: 拦截浏览器默认粘贴行为。
+  // 浏览器默认 Ctrl+V 会尝试粘贴富文本/图片（剪贴板里有啥就塞啥），
+  // 导致终端里出现乱码或图片路径。这里改为读取纯文本再发送。
+  term.attachCustomKeyEventHandler((e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v' && e.type === 'keydown') {
+      // 如果用户明确按了 Ctrl+Shift+V，走浏览器原生纯文本粘贴（更可靠）
+      if (e.shiftKey) return true;
+      navigator.clipboard.readText().then((text) => {
+        if (text) _sendInput(text);
+      }).catch(() => {
+        // clipboard API 不可用（如 HTTP 环境），静默回退
+      });
+      return false; // 阻止浏览器默认的富文本粘贴
+    }
+    return true;
   });
 
   const entry = { term, fit, container, attached: false };
