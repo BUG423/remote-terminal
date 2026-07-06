@@ -32,10 +32,20 @@ function setWorkspaceRoot(root) {
  * 创建一个新的终端会话。
  * 所有会话共享同一个工作区根目录（不创建独立子目录），
  * 用户可在终端中自行 mkdir 创建文件夹。
+ *
+ * 去重：如果已存在相同 title + cwd 的 running 会话，复用已有会话。
  * @returns {Session}
  */
 function createSession(sessionId, title, callbacks = {}) {
   const { onData, onExit } = callbacks;
+
+  // 去重：检查是否已存在相同 title + cwd 的 running 会话
+  for (const [existingId, existing] of sessions) {
+    if (existing.status === 'running' && existing.title === title && existing.cwd === WORKSPACE_ROOT) {
+      console.log(`⚠  会话已存在，复用: ${title} (${existingId.slice(0, 8)})`);
+      return existing;
+    }
+  }
 
   if (sessions.has(sessionId)) {
     destroySession(sessionId);
@@ -104,20 +114,54 @@ function getSession(sessionId) {
   return sessions.get(sessionId);
 }
 
-/** 返回可序列化的会话列表（不含 terminal 对象） */
+/** 会话有效状态（只有这些状态会上报给服务器） */
+const VALID_STATUSES = new Set(['running', 'exited']);
+
+/** 返回可序列化的会话列表（不含 terminal 对象），过滤异常状态并去重 */
 function listSessions() {
-  return [...sessions.values()].map((s) => ({
-    id: s.id,
-    title: s.title,
-    cwd: s.cwd,
-    pid: s.pid,
-    status: s.status,
-    createdAt: s.createdAt,
-  }));
+  const seen = new Set();
+  return [...sessions.values()]
+    .filter((s) => {
+      // 过滤异常状态（如 "recovered" 等残留）
+      if (!VALID_STATUSES.has(s.status)) {
+        console.log(`🧹 过滤异常状态会话不上报: ${s.title} (${s.id.slice(0, 8)}) status=${s.status}`);
+        return false;
+      }
+      // 按 title + cwd 去重（同标题同路径只保留第一个）
+      const key = `${s.title}||${s.cwd}`;
+      if (seen.has(key)) {
+        console.log(`🧹 去重重复会话不上报: ${s.title} (${s.id.slice(0, 8)}) cwd=${s.cwd}`);
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .map((s) => ({
+      id: s.id,
+      title: s.title,
+      cwd: s.cwd,
+      pid: s.pid,
+      status: s.status,
+      createdAt: s.createdAt,
+    }));
 }
 
 function destroyAllSessions() {
   for (const id of [...sessions.keys()]) destroySession(id);
+}
+
+/** 清理所有异常状态的会话（如 recovered、disconnected 等非 running/exited 状态） */
+function cleanStaleSessions() {
+  let cleaned = 0;
+  for (const [id, s] of sessions) {
+    if (!VALID_STATUSES.has(s.status)) {
+      console.log(`🧹 清理残留会话: ${s.title} (${id.slice(0, 8)}) status=${s.status}`);
+      sessions.delete(id);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) console.log(`🧹 共清理 ${cleaned} 个残留会话`);
+  return cleaned;
 }
 
 module.exports = {
@@ -128,6 +172,7 @@ module.exports = {
   getSession,
   listSessions,
   destroyAllSessions,
+  cleanStaleSessions,
   get WORKSPACE_ROOT() {
     return WORKSPACE_ROOT;
   },

@@ -139,9 +139,10 @@ function send(data) {
   return false;
 }
 
-/** 向服务器上报完整会话列表 */
+/** 向服务器上报完整会话列表（自动去重 + 过滤异常状态） */
 function reportSessions() {
-  send({ type: 'sessions', sessions: sessionManager.listSessions() });
+  const sessions = sessionManager.listSessions();
+  send({ type: 'sessions', sessions });
 }
 
 // ─── 终端输出批处理 ─────────────────────────────────────────────
@@ -178,6 +179,8 @@ function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
       console.log('🤖 Agent 认证成功');
+      // 清理可能残留的异常状态会话，然后上报
+      sessionManager.cleanStaleSessions();
       reportSessions();
       break;
 
@@ -397,6 +400,9 @@ setInterval(() => {
 }, HEARTBEAT_MS);
 
 // ─── 启动 ───────────────────────────────────────────────────────
+// 清理启动前可能残留的异常状态会话
+const cleaned = sessionManager.cleanStaleSessions();
+
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
 console.log('║         Claude Web Agent 🤖              ║');
@@ -404,6 +410,7 @@ console.log(`║  Server : ${SERVER_URL.padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
 console.log(`║  📝 审计 : ${auditLog.logPath().slice(0, 30).padEnd(30)}║`);
+console.log(`║  🧹 清理 : ${String(cleaned + '个残留').padEnd(30)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
 
