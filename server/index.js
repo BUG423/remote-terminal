@@ -75,6 +75,18 @@ app.get('/health', (_req, res) => {
   for (const [, a] of agents) { if (a.ws && a.ws.readyState === 1) agentCount++; }
   res.json({ status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount });
 });
+app.get('/debug', (_req, res) => {
+  const data = {};
+  for (const [token, slot] of agents) {
+    data[slot.name || token.slice(0, 8)] = {
+      agentOnline: !!(slot.ws && slot.ws.readyState === 1),
+      sessionCount: slot.sessions.length,
+      sessions: slot.sessions.map(s => ({ id: s.id, title: s.title, status: s.status, cwd: s.cwd })),
+      scrollbackKeys: [...slot.scrollback.keys()].map(k => k.slice(0,8)),
+    };
+  }
+  res.json(data);
+});
 
 // ─── HTTP / HTTPS 服务器 ──────────────────────────────────────────
 let server;
@@ -339,7 +351,29 @@ wss.on('connection', (ws, req) => {
         case 'sessions': {
           const slot = agents.get(boundToken);
           if (slot) {
-            slot.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+            const raw = Array.isArray(data.sessions) ? data.sessions : [];
+            // 多维度去重：同一 ID 或 同一 (title, cwd) 组合只保留第一个
+            // Agent 端 bug 会导致同标题/同路径的 recovered 会话以不同 ID 重复上报
+            const seenIds = new Set();
+            const seenKeys = new Set();
+            slot.sessions = raw.filter(s => {
+              if (!s || !s.id) return false;
+              if (seenIds.has(s.id)) return false;
+              // 用 title + cwd 作为业务唯一键去重
+              const key = `${s.title || ''}||${s.cwd || ''}`;
+              if (seenKeys.has(key)) {
+                console.log(`🧹 去重重复会话: ${s.title} (${s.id.slice(0,8)}…) cwd=${s.cwd}`);
+                return false;
+              }
+              // 过滤掉异常状态（如 "recovered" 等 Agent 恢复功能产生的残留）
+              if (!['running', 'exited', 'disconnected'].includes(s.status)) {
+                console.log(`🧹 过滤异常状态会话: ${s.title} (${s.id.slice(0,8)}…) status=${s.status}`);
+                return false;
+              }
+              seenIds.add(s.id);
+              seenKeys.add(key);
+              return true;
+            });
             broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
           }
           break;
