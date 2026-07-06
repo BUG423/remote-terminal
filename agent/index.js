@@ -5,7 +5,7 @@
  * 职责：
  *   - 连接云服务器（带自动重连）
  *   - 管理多个交互式终端会话（创建 / 输入 / resize / 删除）
- *   - 每个会话在共享的工作区根目录下启动
+ *   - 每个会话绑定一个独立工作目录
  *   - 兼容旧的 Claude Code 聊天协议（chat / stream-json）
  * ═══════════════════════════════════════════════════════════════
  */
@@ -16,7 +16,7 @@ const fs = require('fs');
 const os = require('os');
 const WebSocket = require('ws');
 const sessionManager = require('./session-manager');
-const auditLog = require('./audit-log');
+const logger = require('../logger');
 
 // ─── 配置 ───────────────────────────────────────────────────────
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
@@ -50,21 +50,47 @@ if (process.env.CLAUDE_WEB_TOKEN) {
 const {
   token,
   serverHost,
-  serverPort = 3002,
+  serverPort = 3000,
   useTLS = false,
   workspaceRoot,
+  serverIp,
 } = config;
 
-// useTLS=false + Nginx 代理 → 通过 CW_USE_WSS=true 仍可用 WSS 连接
+// Nginx 反向代理模式：Node.js 不处理 TLS，但 Agent 仍需通过 WSS 连接
+// 设置 CW_USE_WSS=true 环境变量，或在 config.json 中设 useTLS:true 均可
 const useWSS = useTLS || process.env.CW_USE_WSS === 'true';
 const SERVER_URL = `${useWSS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
 const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
+
+// 若配置了 serverIp，覆盖 dns.lookup，让域名直接解析到该 IP（DNS 不可用时的 fallback）
+// 域名仍作为 TLS servername，证书校验照常进行。
+if (serverIp) {
+  const dns = require('dns');
+  const _origLookup = dns.lookup.bind(dns);
+  // Node.js v24 的 https 内部以 {all:true} 调用 lookup，需返回地址数组；
+  // 普通调用时返回单地址。两种格式都处理，保持 TLS servername 为域名以通过证书校验。
+  dns.lookup = function (hostname, options, callback) {
+    if (hostname === serverHost) {
+      const cb = typeof options === 'function' ? options : callback;
+      const opts = typeof options === 'object' ? options : {};
+      if (opts.all) return cb(null, [{ address: serverIp, family: 4 }]);
+      return cb(null, serverIp, 4);
+    }
+    return _origLookup(hostname, options, callback);
+  };
+}
+
+// 初始化日志
+logger.init('agent');
+logger.info('Agent 启动', { serverHost, serverPort, workspaceRoot: ROOT });
 
 // ─── 状态 ───────────────────────────────────────────────────────
 let ws = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let lastPongAt = 0;        // 最近一次收到服务器 pong 的时间戳
+let heartbeatTimer = null; // 心跳定时器
+let deadConnectionTimer = null; // 死连接检测定时器
 const MAX_RECONNECT_DELAY = 30000;
 const HEARTBEAT_MS = Number(process.env.CW_HEARTBEAT_MS) || 25000;       // 每 25s 发一次心跳
 const PONG_TIMEOUT_MS = Number(process.env.CW_PONG_TIMEOUT_MS) || 70000; // 超过 70s 没收到任何 pong → 判定连接已死
@@ -74,57 +100,100 @@ const chatProcesses = new Map(); // sessionId -> { proc, queue, history }
 
 // ─── WebSocket 连接 ─────────────────────────────────────────────
 function connect() {
-  console.log(`🔗 正在连接服务器: ${SERVER_URL}`);
+  logger.connection(`正在连接到 ${SERVER_URL}`);
   ws = new WebSocket(SERVER_URL);
 
   ws.on('open', () => {
-    console.log('✅ 已连接到服务器');
+    logger.connection('已连接到服务器');
     reconnectAttempts = 0;
     lastPongAt = Date.now();
+
     // 开启 TCP keepalive，让操作系统也能较快发现死链
     try { ws._socket && ws._socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
+
     ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+
+    // 启动心跳定时器
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_MS);
+
+    // 启动死连接检测定时器
+    if (deadConnectionTimer) clearInterval(deadConnectionTimer);
+    deadConnectionTimer = setInterval(checkDeadConnection, PONG_TIMEOUT_MS / 2);
   });
 
   // 协议层 pong（服务器若用 ws.ping() 探测，这里自动回应并记录存活）
-  ws.on('pong', () => { lastPongAt = Date.now(); });
+  ws.on('pong', () => {
+    lastPongAt = Date.now();
+    logger.heartbeat('收到 pong', { lastPongAtMs: lastPongAt });
+  });
 
   ws.on('message', (raw) => {
     let data;
     try {
       data = JSON.parse(raw.toString());
     } catch {
-      console.warn('⚠  收到无效 JSON');
+      logger.warn('收到无效 JSON');
       return;
     }
     handleMessage(data);
   });
 
   ws.on('close', (code) => {
-    console.log(`🔌 与服务器断开 (code: ${code})`);
+    logger.connection(`与服务器断开 (code: ${code})`);
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (deadConnectionTimer) { clearInterval(deadConnectionTimer); deadConnectionTimer = null; }
     ws = null;
     // code 4000 = 服务器端 "New agent connected"：已有另一个 Agent 接管。
     // 若此时自动重连，会和对方互相踢下线形成每秒乒乓循环，导致会话错乱。
     // 因此被踢的 Agent 停止重连、进入空闲，确保全局只有一个活跃 Agent。
     if (code === 4000) {
-      console.warn('⚠  另一个 Agent 已接管服务器连接（code 4000）。');
-      console.warn('⚠  本 Agent 停止自动重连并进入空闲，避免两个 Agent 互相抢占。');
-      console.warn('⚠  请确认只运行一个 Agent；如需本机接管，请先停止另一个 Agent 再重启本进程。');
+      logger.warn('另一个 Agent 已接管服务器连接（code 4000）');
+      logger.warn('本 Agent 停止自动重连并进入空闲，避免两个 Agent 互相抢占');
+      logger.warn('请确认只运行一个 Agent；如需本机接管，请先停止另一个 Agent 再重启本进程');
       return;
     }
     scheduleReconnect();
   });
 
   ws.on('error', (err) => {
-    console.error('⚠  WebSocket 错误:', err.message);
+    logger.error('WebSocket 错误', { message: err.message });
   });
+}
+
+function sendHeartbeat() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const now = Date.now();
+    ws.ping(() => {
+      logger.heartbeat('发送 heartbeat ping', { sentAt: now });
+    });
+  }
+}
+
+function checkDeadConnection() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const now = Date.now();
+  const timeSincePong = now - lastPongAt;
+
+  if (timeSincePong > PONG_TIMEOUT_MS) {
+    logger.error('检测到死连接（half-open），强制 terminate', {
+      timeSincePongMs: timeSincePong,
+      thresholdMs: PONG_TIMEOUT_MS,
+    });
+    // 用 terminate() 而非 close()：half-open 时 TCP 层假装存活，
+    // close() 握手永远等不到对端 ACK，terminate() 直接销毁 socket 才能触发 close 事件
+    try { ws.terminate(); } catch { /* ignore */ }
+  } else if (timeSincePong > PONG_TIMEOUT_MS / 2) {
+    logger.warn('连接可能不稳定', { timeSincePongMs: timeSincePong });
+  }
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
   reconnectAttempts++;
-  console.log(`🔄 ${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)...`);
+  logger.connection(`${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)...`, { delayMs: delay });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -177,7 +246,12 @@ function dropOutputBuffer(sessionId) {
 function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
-      console.log('🤖 Agent 认证成功');
+      logger.info('Agent 认证成功');
+      // 恢复已有的会话目录
+      const recovered = sessionManager.recoverSessions();
+      if (recovered.length > 0) {
+        logger.info(`已恢复 ${recovered.length} 个会话目录`, { count: recovered.length });
+      }
       reportSessions();
       break;
 
@@ -189,12 +263,16 @@ function handleMessage(data) {
     // ── 终端：输入 ────────────────────────────────────────────
     case 'terminal_input': {
       const session = sessionManager.getSession(data.sessionId);
-      if (session && session.status === 'running') {
+      if (!session) {
+        send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在，请重新创建会话' });
+        break;
+      }
+      // 惰性恢复：Agent 重启后会话为 recovered，首次输入即自动 re-attach
+      if (session.status === 'recovered' || !session.terminal) attachSession(session);
+      if (session.terminal && session.status === 'running') {
         session.terminal.write(data.data);
-        // 审计日志：记录用户输入（仅 Enter 结束时写入完整命令行）
-        auditLog.feed(data.sessionId, session.title, data.data);
       } else {
-        send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在或已退出，请重新创建会话' });
+        send({ type: 'terminal_error', sessionId: data.sessionId, message: '终端不存在或已退出，请重新创建会话或点击该会话激活它' });
       }
       break;
     }
@@ -202,14 +280,16 @@ function handleMessage(data) {
     // ── 终端：resize ─────────────────────────────────────────
     case 'terminal_resize': {
       const session = sessionManager.getSession(data.sessionId);
-      if (session) session.terminal.resize(data.cols, data.rows);
+      if (!session) break;
+      // 惰性恢复：selectSession 切到会话时会发 resize，借此自动 re-attach
+      if (session.status === 'recovered' || !session.terminal) attachSession(session);
+      if (session.terminal) session.terminal.resize(data.cols, data.rows);
       break;
     }
 
     // ── 终端：删除 ────────────────────────────────────────────
     case 'terminal_delete': {
       dropOutputBuffer(data.sessionId);
-      auditLog.clearSession(data.sessionId);
       sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
       send({ type: 'terminal_closed', sessionId: data.sessionId });
       reportSessions();
@@ -230,8 +310,44 @@ function handleMessage(data) {
       lastPongAt = Date.now();
       break;
 
+    case 'error':
+      logger.error('收到服务器错误消息', { message: data.message });
+      break;
+
     default:
-      console.log('📩 未知消息类型:', data.type);
+      logger.warn('未知消息类型', { type: data.type });
+  }
+}
+
+/**
+ * 为一个 recovered 会话创建 tmux 客户端并接回 live 会话（re-attach）。
+ * 幂等：createTerminal 内部用 `tmux new-session -A`，会话已存在则 attach。
+ * @returns {boolean} 是否成功
+ */
+function attachSession(session) {
+  const sessionId = session.id;
+  try {
+    const { createTerminal } = require('./terminal');
+    const terminal = createTerminal({
+      sessionId,
+      cwd: session.cwd,
+      onData: (chunk) => queueOutput(sessionId, chunk),
+      onExit: (evt) => {
+        flushOutput(sessionId);
+        if (evt && evt.sessionAlive) return; // 仅 detach，tmux 会话仍存活，不算退出
+        session.status = 'exited';
+        send({ type: 'terminal_exit', sessionId, exitCode: evt.exitCode, signal: evt.signal });
+        reportSessions();
+      },
+    });
+    session.terminal = terminal;
+    session.pid = terminal.pid;
+    session.status = 'running';
+    logger.info('已 re-attach 恢复会话', { sessionId: sessionId.slice(0, 8), pid: terminal.pid });
+    return true;
+  } catch (err) {
+    logger.error('re-attach 会话失败', { sessionId: sessionId.slice(0, 8), message: err.message });
+    return false;
   }
 }
 
@@ -239,19 +355,29 @@ function onTerminalCreate(data) {
   const { sessionId, title } = data;
   if (!sessionId) return;
 
-  // 已存在则直接回报，不重复创建
-  if (sessionManager.getSession(sessionId)) {
-    const s = sessionManager.getSession(sessionId);
-    send({ type: 'terminal_created', sessionId, title: s.title, cwd: s.cwd, pid: s.pid, status: s.status });
+  // 已存在的会话：可能是正在运行、已退出、或已恢复
+  const existing = sessionManager.getSession(sessionId);
+  if (existing) {
+    // 已恢复的会话（status='recovered'）：re-attach 到存活的 tmux 会话
+    if (existing.status === 'recovered' || !existing.terminal) {
+      if (!attachSession(existing)) {
+        send({ type: 'terminal_error', sessionId, message: `恢复会话失败，请重新创建` });
+        return;
+      }
+    }
+
+    // 返回已有会话的信息
+    send({ type: 'terminal_created', sessionId, title: existing.title, cwd: existing.cwd, pid: existing.pid, status: existing.status });
     reportSessions();
     return;
   }
 
+  // 创建全新会话
   try {
     const session = sessionManager.createSession(sessionId, title || '新会话', {
       onData: (sid, chunk) => queueOutput(sid, chunk),
       onExit: (sid, evt) => {
-        flushOutput(sid); // 先把残留输出发完
+        flushOutput(sid);
         send({ type: 'terminal_exit', sessionId: sid, exitCode: evt.exitCode, signal: evt.signal });
         reportSessions();
       },
@@ -266,7 +392,7 @@ function onTerminalCreate(data) {
     });
     reportSessions();
   } catch (err) {
-    console.error('❌ 创建终端失败:', err.message);
+    logger.error('创建终端失败', { message: err.message });
     send({ type: 'terminal_error', sessionId, message: `创建终端失败: ${err.message}` });
   }
 }
@@ -374,28 +500,6 @@ function runClaudeProcess(sessionId, message) {
   }, 5 * 60 * 1000);
 }
 
-// ─── 心跳 + 死连接检测 ──────────────────────────────────────────
-// half-open（半开）连接：TCP 一侧已死但本端 ws 不触发 close，导致永不重连。
-// 这里主动发心跳并校验 pong：若超过 PONG_TIMEOUT_MS 没收到任何 pong，
-// 判定连接已死，主动 terminate() 触发 close → 走正常重连流程（PTY 会话因进程
-// 存活而保留，重连后自动重新上报，无需重建）。
-setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-  // 死连接判定：长时间没有任何 pong
-  if (lastPongAt && Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
-    console.warn(`⚠  超过 ${PONG_TIMEOUT_MS / 1000}s 未收到服务器响应，判定连接已死，强制重连`);
-    try { ws.terminate(); } catch { /* ignore */ }  // 立即触发 close → scheduleReconnect
-    return;
-  }
-
-  // 同时发应用层 ping 和协议层 ping（任一条回应都会刷新 lastPongAt）
-  try {
-    ws.send(JSON.stringify({ type: 'ping' }));
-    ws.ping();
-  } catch { /* 发送失败说明链路有问题，下个周期会被超时逻辑兜底 */ }
-}, HEARTBEAT_MS);
-
 // ─── 启动 ───────────────────────────────────────────────────────
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
@@ -403,7 +507,6 @@ console.log('║         Claude Web Agent 🤖              ║');
 console.log(`║  Server : ${SERVER_URL.padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
-console.log(`║  📝 审计 : ${auditLog.logPath().slice(0, 30).padEnd(30)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
 

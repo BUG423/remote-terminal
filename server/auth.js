@@ -22,23 +22,31 @@ function createAuthMiddleware(config) {
 
   if (tokens && typeof tokens === 'object') {
     for (const [tok, name] of Object.entries(tokens)) {
-      if (tok && tok.length >= 8) tokenMap.set(tok, String(name || ''));
+      if (tok && tok.length >= 32) tokenMap.set(tok, String(name || ''));
+      else console.warn(`⚠  Token 被忽略（长度不足32字符）: "${tok.slice(0, 8)}..."`);
     }
   }
 
   // 兼容旧版单 token
   if (legacyToken && !tokenMap.has(legacyToken)) {
+    if (legacyToken.length < 32) {
+      console.error('❌ Token 长度不足！必须至少32个字符。请使用以下命令生成强 Token:');
+      console.error('   node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
+      process.exit(1);
+    }
     tokenMap.set(legacyToken, 'default');
   }
 
   const mode = tokens ? 'multi' : 'single';
 
   if (tokenMap.size === 0) {
-    console.warn('⚠  WARNING: 未配置任何有效 Token！请在 config.json 中设置 tokens 或 token。');
-  } else if (mode === 'single') {
-    if (legacyToken === 'your-shared-secret-token-change-me') {
-      console.warn('⚠  WARNING: 使用默认 Token，请立即更换！');
-    }
+    console.error('❌ 未配置任何有效 Token！请在 config.json 中设置 tokens 或 token。');
+    console.error('   生成强 Token: node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
+    process.exit(1);
+  } else if (mode === 'single' && legacyToken === 'your-shared-secret-token-change-me') {
+    console.error('❌ 使用默认 Token！这存在严重安全风险。请生成强 Token并更新 config.json:');
+    console.error('   node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
+    process.exit(1);
   }
 
   return {

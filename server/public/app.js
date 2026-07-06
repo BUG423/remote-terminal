@@ -120,10 +120,19 @@ function handleMessage(data) {
       STATE.agentOnline = data.online;
       if (data.agentName) STATE.agentName = data.agentName;
       updateAgentStatus();
+      if (!data.online) {
+        // Agent 离线：立即把所有会话标记为 disconnected，然后清理
+        for (const s of STATE.sessions) s.status = 'disconnected';
+        cleanDisconnectedSessions();
+      }
       break;
 
     case 'sessions':
       STATE.sessions = data.sessions || [];
+      // Agent 离线时清理所有 disconnected 会话（不要求全部都是 disconnected）
+      if (!STATE.agentOnline) {
+        cleanDisconnectedSessions();
+      }
       renderSessionList();
       reconcileTerminals();
       updateActiveHeader();
@@ -191,6 +200,32 @@ function removeSession(id) {
     if (next) selectSession(next.id);
     else updateActiveHeader();
   }
+}
+
+/** 清理所有 disconnected / recovered 等异常状态的会话 */
+const STALE_STATUSES = new Set(['disconnected', 'recovered']);
+
+function cleanDisconnectedSessions() {
+  const staleIds = new Set(
+    STATE.sessions.filter(s => STALE_STATUSES.has(s.status)).map(s => s.id)
+  );
+  if (staleIds.size === 0) return;
+  // 销毁对应的终端实例和 DOM
+  for (const id of staleIds) {
+    const t = terminals.get(id);
+    if (t) { t.term.dispose(); t.container.remove(); terminals.delete(id); }
+  }
+  // 从会话列表中移除
+  STATE.sessions = STATE.sessions.filter(s => !staleIds.has(s.id));
+  // 如果当前选中的是被清理的会话，切换到下一个
+  if (STATE.activeId && staleIds.has(STATE.activeId)) {
+    STATE.activeId = null;
+    localStorage.removeItem('claude-web-active');
+    const next = STATE.sessions.find(s => s.status === 'running');
+    if (next) selectSession(next.id);
+    else updateActiveHeader();
+  }
+  renderSessionList();
 }
 
 // 服务器会话列表变化时，丢弃本地已不存在的终端
@@ -472,7 +507,7 @@ function updateAgentStatus() {
 }
 
 function statusText(s) {
-  return { running: '运行中', exited: '已退出', disconnected: '断开' }[s] || s || '';
+  return { running: '运行中', exited: '已退出', disconnected: '断开', recovered: '残留' }[s] || s || '';
 }
 function shortPath(p) {
   if (!p) return '';

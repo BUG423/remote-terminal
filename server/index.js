@@ -95,13 +95,16 @@ if (USE_TLS) {
 const wss = new WebSocketServer({ server });
 
 // ─── 连接状态（多 Agent 架构）──────────────────────────────────────
-// token → { ws, name, sessions: [], scrollback: Map<sessionId, string> }
-/** @type {Map<string, {ws: WebSocket|null, name: string, sessions: any[], scrollback: Map<string,string>}>} */
+// token → { ws, name, sessions: [], scrollback: Map<sessionId, string>, cleanupTimer }
+/** @type {Map<string, {ws: WebSocket|null, name: string, sessions: any[], scrollback: Map<string,string>, cleanupTimer: any}>} */
 const agents = new Map();
 
 // 浏览器客户端：clientId → { ws, token }
 /** @type {Map<string, {ws: WebSocket, token: string}>} */
 const browserClients = new Map();
+
+/** Agent 离线后残留 disconnected 会话的自动清理延迟 */
+const DISCONNECTED_CLEANUP_MS = 30000;
 
 /**
  * 获取或创建 Agent 槽位。
@@ -109,12 +112,41 @@ const browserClients = new Map();
 function ensureAgentSlot(token, name) {
   let slot = agents.get(token);
   if (!slot) {
-    slot = { ws: null, name: name || 'unknown', sessions: [], scrollback: new Map() };
+    slot = { ws: null, name: name || 'unknown', sessions: [], scrollback: new Map(), cleanupTimer: null };
     agents.set(token, slot);
   } else if (name && name !== 'unknown') {
     slot.name = name;
   }
   return slot;
+}
+
+/** Agent 离线后启动清理定时器：超时后自动清除残留的 disconnected 会话 */
+function scheduleDisconnectedCleanup(token) {
+  const slot = agents.get(token);
+  if (!slot) return;
+  if (slot.cleanupTimer) { clearTimeout(slot.cleanupTimer); slot.cleanupTimer = null; }
+  slot.cleanupTimer = setTimeout(() => {
+    const s = agents.get(token);
+    if (s && !s.ws) {
+      const removed = s.sessions.filter(x => x.status === 'disconnected').length;
+      if (removed > 0) {
+        s.sessions = [];
+        s.scrollback.clear();
+        broadcastToBrowsers(token, { type: 'sessions', sessions: [] });
+        console.log(`🧹 已清理 Agent「${s.name}」的 ${removed} 个残留会话（离线超时）`);
+      }
+    }
+    if (s) s.cleanupTimer = null;
+  }, DISCONNECTED_CLEANUP_MS);
+}
+
+/** Agent 重连后取消清理定时器 */
+function cancelDisconnectedCleanup(token) {
+  const slot = agents.get(token);
+  if (slot && slot.cleanupTimer) {
+    clearTimeout(slot.cleanupTimer);
+    slot.cleanupTimer = null;
+  }
 }
 
 // ─── 工具 ───────────────────────────────────────────────────────
@@ -208,11 +240,13 @@ wss.on('connection', (ws, req) => {
           slot.ws.close(4000, 'New agent connected for this token');
         }
         slot.ws = ws;
+        // Agent 重连，取消残留会话清理定时器
+        cancelDisconnectedCleanup(boundToken);
         console.log(`🤖 Agent 已连接: ${result.name || boundToken.slice(0,8)} (token: ${boundToken.slice(0,8)}…)`);
         ws.send(JSON.stringify({ type: 'auth_ok', role: 'agent' }));
         // 通知该 Token 的浏览器：Agent 上线
         broadcastToBrowsers(boundToken, { type: 'agent_status', online: true, agentName: slot.name });
-        // 请求 Agent 上报会话
+        // 请求 Agent 上报会话（Agent 重新上报后会覆盖服务器缓存的旧列表）
         sendToAgent(boundToken, { type: 'terminal_list' });
       } else {
         clientType = 'browser';
@@ -220,13 +254,17 @@ wss.on('connection', (ws, req) => {
         const slot = agents.get(boundToken);
         const agentOnline = !!(slot && slot.ws && slot.ws.readyState === 1);
         console.log(`🌐 浏览器已连接: ${clientId} → ${result.name || boundToken.slice(0,8)} (共 ${countBrowsersFor(boundToken)} 个)`);
+        // 始终过滤掉 disconnected 状态会话（这些是 Agent 断开后残留的）
+        const browserSessions = (agentOnline && slot)
+          ? slot.sessions.filter(s => s.status !== 'disconnected')
+          : [];
         ws.send(JSON.stringify({
           type: 'auth_ok',
           role: 'browser',
           clientId,
           agentName: slot ? slot.name : result.name,
           agentOnline,
-          sessions: slot ? slot.sessions : [],
+          sessions: browserSessions,
         }));
       }
       return;
@@ -301,7 +339,29 @@ wss.on('connection', (ws, req) => {
         case 'sessions': {
           const slot = agents.get(boundToken);
           if (slot) {
-            slot.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+            const raw = Array.isArray(data.sessions) ? data.sessions : [];
+            // 多维度去重：同一 ID 或 同一 (title, cwd) 组合只保留第一个
+            // Agent 端 bug 会导致同标题/同路径的 recovered 会话以不同 ID 重复上报
+            const seenIds = new Set();
+            const seenKeys = new Set();
+            slot.sessions = raw.filter(s => {
+              if (!s || !s.id) return false;
+              if (seenIds.has(s.id)) return false;
+              // 用 title + cwd 作为业务唯一键去重
+              const key = `${s.title || ''}||${s.cwd || ''}`;
+              if (seenKeys.has(key)) {
+                console.log(`🧹 去重重复会话: ${s.title} (${s.id.slice(0,8)}…) cwd=${s.cwd}`);
+                return false;
+              }
+              // 过滤掉异常状态（如 "recovered" 等 Agent 恢复功能产生的残留）
+              if (!['running', 'exited', 'disconnected'].includes(s.status)) {
+                console.log(`🧹 过滤异常状态会话: ${s.title} (${s.id.slice(0,8)}…) status=${s.status}`);
+                return false;
+              }
+              seenIds.add(s.id);
+              seenKeys.add(key);
+              return true;
+            });
             broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
           }
           break;
@@ -320,10 +380,12 @@ wss.on('connection', (ws, req) => {
       const slot = agents.get(boundToken);
       if (slot && slot.ws === ws) {
         slot.ws = null;
-        // 标记会话为 disconnected
+        // 标记会话为 disconnected（已连接的浏览器实时看到状态变化）
         slot.sessions = slot.sessions.map((s) => ({ ...s, status: 'disconnected' }));
         broadcastToBrowsers(boundToken, { type: 'agent_status', online: false, agentName: slot.name });
         broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
+        // 启动清理定时器：Agent 若 30 秒内未重连，自动清除残留会话
+        scheduleDisconnectedCleanup(boundToken);
       }
     } else if (clientType === 'browser') {
       browserClients.delete(clientId);
@@ -356,6 +418,13 @@ setInterval(() => {
   }
   for (const [token, slot] of agents) {
     if (slot.ws && slot.ws.readyState !== 1) {
+      // 心跳发现 Agent 死连接：补充标记 + 通知 + 清理（兜底 close 事件的竞态）
+      if (slot.sessions.length > 0) {
+        slot.sessions = slot.sessions.map((s) => ({ ...s, status: 'disconnected' }));
+        broadcastToBrowsers(token, { type: 'agent_status', online: false, agentName: slot.name });
+        broadcastToBrowsers(token, { type: 'sessions', sessions: slot.sessions });
+        scheduleDisconnectedCleanup(token);
+      }
       slot.ws = null;
     }
   }
