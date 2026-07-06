@@ -75,18 +75,6 @@ app.get('/health', (_req, res) => {
   for (const [, a] of agents) { if (a.ws && a.ws.readyState === 1) agentCount++; }
   res.json({ status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount });
 });
-app.get('/debug', (_req, res) => {
-  const data = {};
-  for (const [token, slot] of agents) {
-    data[slot.name || token.slice(0, 8)] = {
-      agentOnline: !!(slot.ws && slot.ws.readyState === 1),
-      sessionCount: slot.sessions.length,
-      sessions: slot.sessions.map(s => ({ id: s.id, title: s.title, status: s.status, cwd: s.cwd })),
-      scrollbackKeys: [...slot.scrollback.keys()].map(k => k.slice(0,8)),
-    };
-  }
-  res.json(data);
-});
 
 // ─── HTTP / HTTPS 服务器 ──────────────────────────────────────────
 let server;
