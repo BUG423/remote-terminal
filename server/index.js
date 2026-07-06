@@ -254,8 +254,10 @@ wss.on('connection', (ws, req) => {
         const slot = agents.get(boundToken);
         const agentOnline = !!(slot && slot.ws && slot.ws.readyState === 1);
         console.log(`🌐 浏览器已连接: ${clientId} → ${result.name || boundToken.slice(0,8)} (共 ${countBrowsersFor(boundToken)} 个)`);
-        // Agent 在线时发送实际会话列表；离线时不发送残留的 disconnected 会话
-        const browserSessions = agentOnline && slot ? slot.sessions : [];
+        // 始终过滤掉 disconnected 状态会话（这些是 Agent 断开后残留的）
+        const browserSessions = (agentOnline && slot)
+          ? slot.sessions.filter(s => s.status !== 'disconnected')
+          : [];
         ws.send(JSON.stringify({
           type: 'auth_ok',
           role: 'browser',
@@ -394,6 +396,13 @@ setInterval(() => {
   }
   for (const [token, slot] of agents) {
     if (slot.ws && slot.ws.readyState !== 1) {
+      // 心跳发现 Agent 死连接：补充标记 + 通知 + 清理（兜底 close 事件的竞态）
+      if (slot.sessions.length > 0) {
+        slot.sessions = slot.sessions.map((s) => ({ ...s, status: 'disconnected' }));
+        broadcastToBrowsers(token, { type: 'agent_status', online: false, agentName: slot.name });
+        broadcastToBrowsers(token, { type: 'sessions', sessions: slot.sessions });
+        scheduleDisconnectedCleanup(token);
+      }
       slot.ws = null;
     }
   }

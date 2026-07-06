@@ -120,14 +120,17 @@ function handleMessage(data) {
       STATE.agentOnline = data.online;
       if (data.agentName) STATE.agentName = data.agentName;
       updateAgentStatus();
-      // Agent 离线时清理本地残留的 disconnected 会话（终端实例和列表项）
-      if (!data.online) cleanDisconnectedSessions();
+      if (!data.online) {
+        // Agent 离线：立即把所有会话标记为 disconnected，然后清理
+        for (const s of STATE.sessions) s.status = 'disconnected';
+        cleanDisconnectedSessions();
+      }
       break;
 
     case 'sessions':
       STATE.sessions = data.sessions || [];
-      // 如果所有会话都是 disconnected 且 Agent 离线，直接清空
-      if (!STATE.agentOnline && STATE.sessions.length > 0 && STATE.sessions.every(s => s.status === 'disconnected')) {
+      // Agent 离线时清理所有 disconnected 会话（不要求全部都是 disconnected）
+      if (!STATE.agentOnline) {
         cleanDisconnectedSessions();
       }
       renderSessionList();
