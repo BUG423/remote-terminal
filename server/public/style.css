@@ -23,10 +23,9 @@ body {
   overflow: hidden;
 }
 .hidden { display: none !important; }
-.screen { height: 100vh; width: 100vw; }
 
 /* ── 登录 ──────────────────────────────────────────────────── */
-#login-screen { display: flex; align-items: center; justify-content: center; }
+#login-screen { display: flex; align-items: center; justify-content: center; height: 100vh; width: 100vw; }
 .login-card {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -54,7 +53,7 @@ body {
 .error-msg { color: var(--danger); font-size: 13px; margin-top: 12px; }
 
 /* ── 主界面布局 ────────────────────────────────────────────── */
-#main-screen { display: flex; }
+#main-screen { display: flex; height: 100vh; width: 100vw; }
 
 /* 侧栏 */
 #sidebar {
@@ -85,6 +84,24 @@ body {
 .s-dot.ok { background: var(--success); }
 .s-dot.warn { background: var(--warn); }
 .s-dot.off { background: var(--text-muted); }
+/* 会话活动指示器：终端有输出时显示脉冲动画 */
+.s-dot.busy {
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--accent); }
+  50% { opacity: 0.4; box-shadow: 0 0 8px var(--accent); }
+}
+/* 会话右侧指示标记：Claude 完成后的 ⏺ 符号 */
+.s-indicator {
+  margin-left: auto;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.s-indicator.done { color: var(--success); }
+.s-indicator.busy-icon { color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+
 .s-meta { display: flex; flex-direction: column; min-width: 0; }
 .s-title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s-cwd { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -98,10 +115,11 @@ body {
 .status-dot.offline { background: var(--text-muted); }
 
 /* 工作区 */
-#workspace { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#workspace { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #terminal-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-2);
+  flex-shrink: 0;
 }
 .th-left { display: flex; flex-direction: column; min-width: 0; }
 #active-title { font-size: 14px; font-weight: 600; }
@@ -126,9 +144,28 @@ body {
 #tile-view-btn.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
 #tile-view-btn:disabled { opacity: .4; cursor: not-allowed; }
 
-#terminals { flex: 1; position: relative; background: #0d1117; overflow: hidden; }
-.term-container { position: absolute; inset: 0; padding: 8px; }
-.term-container .xterm { height: 100%; }
+/* 终端区域：使用 flex 布局填满 */
+#terminals {
+  flex: 1;
+  position: relative;
+  background: #0d1117;
+  overflow: hidden;
+  min-height: 0;
+}
+/* 单屏模式：终端容器填满整个 #terminals */
+.term-container {
+  position: absolute;
+  inset: 0;
+  padding: 4px;
+}
+/* 确保 xterm 填满容器 */
+.term-container .xterm {
+  width: 100% !important;
+  height: 100% !important;
+}
+.term-container .xterm-viewport {
+  width: 100% !important;
+}
 
 /* 分屏模式：CSS Grid */
 #terminals.tiled {

@@ -183,9 +183,15 @@ wss.on('connection', (ws, req) => {
   const clientIp = req.socket.remoteAddress || 'unknown';
   console.log(`🔗 新连接: ${clientId} from ${clientIp}`);
 
-  // 死连接检测
+  // 死连接检测：任何来自对端的字节（pong / ping / message）都算存活信号。
+  // 只监听 pong 会误杀活着但 pong 偶尔延迟的连接（曾出现每 60s 断一次、
+  // 浏览器 UI 不停闪烁的问题）。Agent 每 25s 主动 ping 一次，仅凭这个
+  // 就足以证明存活；无需再等 pong 才认账。
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  const markAlive = () => { ws.isAlive = true; };
+  ws.on('pong', markAlive);
+  ws.on('ping', markAlive);
+  ws.on('message', markAlive);
   try { req.socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
 
   let authenticated = false;
