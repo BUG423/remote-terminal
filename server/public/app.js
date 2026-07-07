@@ -25,6 +25,9 @@ let activityTimer = null;
 // 活动阈值：3 秒内有输出视为"忙碌"，3~10 秒无输出视为"刚完成"
 const ACTIVITY_BUSY_MS = 3000;
 const ACTIVITY_DONE_MS = 10000;
+// Agent 离线后延迟清理会话的定时器（给 Agent 重连留时间）
+let agentOfflineTimer = null;
+const AGENT_OFFLINE_CLEANUP_MS = 30000;
 
 // ── DOM ────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -127,17 +130,27 @@ function handleMessage(data) {
       if (data.agentName) STATE.agentName = data.agentName;
       updateAgentStatus();
       if (!data.online) {
-        // Agent 离线：标记所有会话为 disconnected
+        // Agent 离线：标记为 disconnected 但不立即清理，等 30s 后再清理
+        // 避免 Agent 短暂断连重连时 UI 闪烁
         for (const s of STATE.sessions) s.status = 'disconnected';
-        cleanDisconnectedSessions();
+        renderSessionList();
+        if (!agentOfflineTimer) {
+          agentOfflineTimer = setTimeout(() => {
+            agentOfflineTimer = null;
+            if (!STATE.agentOnline) cleanDisconnectedSessions();
+          }, AGENT_OFFLINE_CLEANUP_MS);
+        }
+      } else {
+        // Agent 重连：取消清理定时器
+        if (agentOfflineTimer) {
+          clearTimeout(agentOfflineTimer);
+          agentOfflineTimer = null;
+        }
       }
       break;
 
     case 'sessions':
       STATE.sessions = data.sessions || [];
-      if (!STATE.agentOnline) {
-        cleanDisconnectedSessions();
-      }
       renderSessionList();
       reconcileTerminals();
       updateActiveHeader();
