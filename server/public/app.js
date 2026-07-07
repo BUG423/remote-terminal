@@ -28,6 +28,9 @@ const ACTIVITY_DONE_MS = 10000;
 // Agent 离线后延迟清理会话的定时器（给 Agent 重连留时间）
 let agentOfflineTimer = null;
 const AGENT_OFFLINE_CLEANUP_MS = 30000;
+// Agent 离线防抖：短暂断连不更新 UI，避免闪烁
+let agentOfflineDebounce = null;
+const AGENT_OFFLINE_DEBOUNCE_MS = 3000;
 
 // ── DOM ────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -71,15 +74,20 @@ function sendWS(obj) {
 }
 
 // ── WebSocket ──────────────────────────────────────────────────
+let connecting = false;
+
 function connect() {
+  if (connecting) return; // 防止重连风暴
   const token = getToken();
   if (!token) return showLogin();
 
+  connecting = true;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${protocol}//${location.host}`);
   STATE.ws = ws;
 
   ws.onopen = () => {
+    connecting = false;
     STATE.reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: 'auth', token: getToken(), role: 'browser' }));
   };
@@ -89,19 +97,26 @@ function connect() {
     handleMessage(data);
   };
   ws.onclose = () => {
+    connecting = false;
     STATE.authenticated = false;
-    STATE.agentOnline = false;
     updateAgentStatus();
     scheduleReconnect();
   };
-  ws.onerror = () => {};
+  ws.onerror = () => { connecting = false; };
 }
 
+let reconnectScheduled = false;
+
 function scheduleReconnect() {
+  if (reconnectScheduled) return;
   if (STATE.reconnectAttempts >= STATE.maxReconnect) return;
+  reconnectScheduled = true;
   const delay = Math.min(1000 * Math.pow(2, STATE.reconnectAttempts), 30000);
   STATE.reconnectAttempts++;
-  setTimeout(connect, delay);
+  setTimeout(() => {
+    reconnectScheduled = false;
+    connect();
+  }, delay);
 }
 
 // ── 消息分发 ───────────────────────────────────────────────────
@@ -126,26 +141,37 @@ function handleMessage(data) {
       break;
 
     case 'agent_status':
-      STATE.agentOnline = data.online;
-      if (data.agentName) STATE.agentName = data.agentName;
-      updateAgentStatus();
       if (!data.online) {
-        // Agent 离线：标记为 disconnected 但不立即清理，等 30s 后再清理
-        // 避免 Agent 短暂断连重连时 UI 闪烁
-        for (const s of STATE.sessions) s.status = 'disconnected';
-        renderSessionList();
-        if (!agentOfflineTimer) {
-          agentOfflineTimer = setTimeout(() => {
-            agentOfflineTimer = null;
-            if (!STATE.agentOnline) cleanDisconnectedSessions();
-          }, AGENT_OFFLINE_CLEANUP_MS);
+        // Agent 离线：先等 3 秒，确认不是短暂断连再更新 UI
+        if (!agentOfflineDebounce) {
+          agentOfflineDebounce = setTimeout(() => {
+            agentOfflineDebounce = null;
+            STATE.agentOnline = false;
+            updateAgentStatus();
+            for (const s of STATE.sessions) s.status = 'disconnected';
+            renderSessionList();
+            // 启动延迟清理
+            if (!agentOfflineTimer) {
+              agentOfflineTimer = setTimeout(() => {
+                agentOfflineTimer = null;
+                if (!STATE.agentOnline) cleanDisconnectedSessions();
+              }, AGENT_OFFLINE_CLEANUP_MS);
+            }
+          }, AGENT_OFFLINE_DEBOUNCE_MS);
         }
       } else {
-        // Agent 重连：取消清理定时器
+        // Agent 上线：取消离线防抖和清理定时器
+        if (agentOfflineDebounce) {
+          clearTimeout(agentOfflineDebounce);
+          agentOfflineDebounce = null;
+        }
         if (agentOfflineTimer) {
           clearTimeout(agentOfflineTimer);
           agentOfflineTimer = null;
         }
+        STATE.agentOnline = true;
+        if (data.agentName) STATE.agentName = data.agentName;
+        updateAgentStatus();
       }
       break;
 

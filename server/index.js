@@ -21,6 +21,15 @@ const { WebSocketServer } = require('ws');
 const { createAuthMiddleware } = require('./auth');
 const rateLimiter = require('./rate-limiter');
 
+// 为所有 console 输出添加时间戳，方便排查时序问题
+const origLog = console.log;
+const origWarn = console.warn;
+const origError = console.error;
+const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+console.log = (...args) => origLog(`[${ts()}]`, ...args);
+console.warn = (...args) => origWarn(`[${ts()}]`, ...args);
+console.error = (...args) => origError(`[${ts()}]`, ...args);
+
 // ─── 配置 ───────────────────────────────────────────────────────
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 let config;
@@ -180,8 +189,8 @@ function appendScrollback(token, sessionId, chunk) {
 // ─── WebSocket 处理 ─────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
-  const clientIp = req.socket.remoteAddress || 'unknown';
-  console.log(`🔗 新连接: ${clientId} from ${clientIp}`);
+  const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${req.headers['user-agent']?.slice(0,40)||'?'})`);
 
   // 死连接检测：任何来自对端的字节（pong / ping / message）都算存活信号。
   // 只监听 pong 会误杀活着但 pong 偶尔延迟的连接（曾出现每 60s 断一次、
