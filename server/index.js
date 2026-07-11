@@ -189,7 +189,11 @@ function appendScrollback(token, sessionId, chunk) {
 // ─── WebSocket 处理 ─────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
-  const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  // 仅信任 Nginx 注入的 X-Real-IP（proxy_set_header X-Real-IP $remote_addr —— 会覆盖客户端自带值，
+  // 真实且不可伪造）。绝不能取 X-Forwarded-For 的首段：$proxy_add_x_forwarded_for 会把客户端携带的
+  // XFF 头透传过来，攻击者据此伪造任意 IP，可让基于 IP 的速率限制/封禁形同虚设。
+  // 直连（绕过 Nginx，仅可能来自 127.0.0.1）时 X-Real-IP 缺失，回退到真实 socket 地址。
+  const clientIp = (req.headers['x-real-ip'] || '').trim() || req.socket.remoteAddress || 'unknown';
   console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${req.headers['user-agent']?.slice(0,40)||'?'})`);
 
   // 死连接检测：任何来自对端的字节（pong / ping / message）都算存活信号。
