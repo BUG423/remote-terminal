@@ -40,7 +40,7 @@ test('旧 serverHost 配置仍可兼容', () => {
 
 test('拒绝非 WebSocket 协议和 URL 内凭据', () => {
   assert.throws(() => buildServerUrl({ serverUrl: 'https://relay.example.com' }, {}), /ws:\/\/ or wss:\/\//);
-  assert.throws(() => buildServerUrl({ serverUrl: 'wss://user:pass@relay.example.com' }, {}), /credentials/);
+  assert.throws(() => buildServerUrl({ serverUrl: 'wss://user:pass@relay.test' }, {}), /credentials/);
 });
 
 test('NO_PROXY 支持域名后缀、端口和通配符', () => {
