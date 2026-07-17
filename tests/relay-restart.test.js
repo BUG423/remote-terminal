@@ -10,7 +10,8 @@ const WebSocket = require('./ws-client');
 
 const root = path.join(__dirname, '..');
 const port = 34000 + Math.floor(Math.random() * 1000);
-const token = crypto.randomBytes(32).toString('base64url');
+const browserToken = crypto.randomBytes(32).toString('base64url');
+const agentToken = crypto.randomBytes(32).toString('base64url');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-terminal-restart-'));
 const workspaceRoot = path.join(tempRoot, 'workspace');
 const configPath = path.join(tempRoot, 'config.json');
@@ -19,9 +20,11 @@ const target = `ws://127.0.0.1:${port}`;
 fs.writeFileSync(configPath, JSON.stringify({
   port,
   bindHost: '127.0.0.1',
-  tokens: { [token]: 'restart-agent' },
+  devices: {
+    'restart-agent': { name: 'restart-agent', browserToken, agentToken },
+  },
   serverUrl: target,
-  agentToken: token,
+  agentToken,
   workspaceRoot,
   maxSessions: 2,
   offlineOutputBytes: 128 * 1024,
@@ -149,7 +152,7 @@ async function connectBrowser() {
     });
     ws.once('error', reject);
   });
-  client.send({ type: 'auth', token, role: 'browser' });
+  client.send({ type: 'auth', token: browserToken, role: 'browser' });
   const auth = await client.waitFor((message) => message.type === 'auth_ok');
   return { client, auth };
 }

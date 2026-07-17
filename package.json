@@ -4,7 +4,7 @@
   "private": true,
   "description": "Web terminal relay with a browser UI, cloud server, and local agent.",
   "scripts": {
-    "test": "node tests/project-files.test.js && node tests/session-dedup.test.js && node tests/e2e-scenarios.test.js && node tests/edge-cases.test.js && node tests/agent-hardening.test.js && node tests/server-protocol.test.js",
+    "test": "node tests/project-files.test.js && node tests/auth.test.js && node tests/session-dedup.test.js && node tests/e2e-scenarios.test.js && node tests/edge-cases.test.js && node tests/agent-hardening.test.js && node tests/server-protocol.test.js",
     "test:security": "node tests/security.js",
     "test:e2e": "node tests/e2e.js"
   },

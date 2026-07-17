@@ -3,9 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${PORT:-3002}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/tmp/remote-terminal-e2e-workspaces}"
-CONFIG_PATH="${CONFIG_PATH:-/tmp/remote-terminal-e2e-config.json}"
-TOKEN="${CLAUDE_WEB_TOKEN:-$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))")}"
+TEST_ROOT="$(mktemp -d /tmp/remote-terminal-tests.XXXXXX)"
+WORKSPACE_ROOT="${TEST_ROOT}/workspace"
+CONFIG_PATH="${TEST_ROOT}/config.json"
+BROWSER_TOKEN="${CW_BROWSER_TOKEN:-${CLAUDE_WEB_TOKEN:-$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")}}"
+AGENT_TOKEN="${CW_AGENT_TOKEN:-$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")}"
 
 SERVER_PID=""
 AGENT_PID=""
@@ -15,22 +17,27 @@ cleanup() {
   if [[ -n "${SERVER_PID}" ]]; then kill "${SERVER_PID}" 2>/dev/null || true; fi
   wait "${AGENT_PID:-0}" 2>/dev/null || true
   wait "${SERVER_PID:-0}" 2>/dev/null || true
+  if [[ "${TEST_ROOT}" == /tmp/remote-terminal-tests.* ]]; then rm -rf "${TEST_ROOT}"; fi
 }
 trap cleanup EXIT INT TERM
 
 cd "${ROOT}"
 
-rm -rf "${WORKSPACE_ROOT}"
 mkdir -p "${WORKSPACE_ROOT}"
 
 cat > "${CONFIG_PATH}" <<JSON
 {
   "port": ${PORT},
   "bindHost": "127.0.0.1",
-  "tokens": { "${TOKEN}": "server-e2e-agent" },
-  "serverHost": "127.0.0.1",
-  "serverPort": ${PORT},
-  "useTLS": false,
+  "devices": {
+    "server-e2e-agent": {
+      "name": "server-e2e-agent",
+      "browserToken": "${BROWSER_TOKEN}",
+      "agentToken": "${AGENT_TOKEN}"
+    }
+  },
+  "agentToken": "${AGENT_TOKEN}",
+  "serverUrl": "ws://127.0.0.1:${PORT}",
   "workspaceRoot": "${WORKSPACE_ROOT}"
 }
 JSON
@@ -55,10 +62,10 @@ AGENT_PID="$!"
 sleep 3
 
 echo "== real e2e =="
-TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${TOKEN}" WORKSPACE_ROOT="${WORKSPACE_ROOT}" node tests/e2e.js
+TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${BROWSER_TOKEN}" WORKSPACE_ROOT="${WORKSPACE_ROOT}" node tests/e2e.js
 
 echo "== security =="
-TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${TOKEN}" CW_AUDIT_LOG="${WORKSPACE_ROOT}/.audit.log" node tests/security.js
+TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${BROWSER_TOKEN}" CW_AUDIT_LOG="${WORKSPACE_ROOT}/.audit.log" node tests/security.js
 
 echo "== real relay restart recovery =="
 node tests/relay-restart.test.js

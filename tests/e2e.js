@@ -20,7 +20,8 @@ try {
   const cfg = require('../config.json');
   if (!token) {
     // 优先从多 Token 配置取第一个，兼容旧单 token
-    token = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
+    const firstDevice = cfg.devices && Object.values(cfg.devices)[0];
+    token = firstDevice?.browserToken || (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
   }
   if (!expectedWorkspaceRoot && cfg.workspaceRoot) expectedWorkspaceRoot = cfg.workspaceRoot;
 } catch {}

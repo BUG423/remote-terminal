@@ -5,7 +5,7 @@
  * 三方消息流：  浏览器 ⇄ Server ⇄ 本地 Agent
  *
  * Server 负责：
- *   - 多 Token 鉴权：每个 Agent 配独立 Token，浏览器按 Token 路由
+ *   - 角色分离鉴权：浏览器与 Agent 使用不同凭据并路由到同一设备
  *   - 转发浏览器 → Agent 的控制消息（创建/输入/resize/删除会话）
  *   - 广播 Agent → 浏览器 的输出与状态（仅限同 Token 的浏览器）
  *   - 维护每 Agent 的会话列表缓存 + 每会话输出滚动缓冲
@@ -460,7 +460,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      const result = verify(data.token);
+      const result = verify(data.token, data.role);
       if (!result.valid) {
         rateLimiter.recordFailed(clientIp);
         safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid token' }));
@@ -468,7 +468,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      if (data.role === 'browser' && countBrowsersFor(result.token) >= MAX_BROWSERS_PER_TOKEN) {
+      if (data.role === 'browser' && countBrowsersFor(result.routingKey) >= MAX_BROWSERS_PER_TOKEN) {
         safeSend(ws, JSON.stringify({ type: 'error', message: 'Too many browser connections' }));
         ws.close(4003, 'Too many browser connections');
         return;
@@ -476,7 +476,7 @@ wss.on('connection', (ws, req) => {
 
       rateLimiter.clearFor(clientIp);
       authenticated = true;
-      boundToken = result.token;
+      boundToken = result.routingKey;
       clearTimeout(authTimeout);
 
       if (data.role === 'agent') {
@@ -700,7 +700,12 @@ server.listen(PORT, BIND_HOST, () => {
   console.log('╔══════════════════════════════════════════╗');
   console.log('║         Claude Web Server 🚀             ║');
   console.log(`║  ${proto} 监听 ${String(BIND_HOST + ':' + PORT).padEnd(24)}║`);
-  console.log(`║  🔑 模式: ${(tokenMode === 'multi' ? '多 Token (' + tokenCount + '个)' : '单 Token').padEnd(30)}║`);
+  const authLabel = tokenMode === 'devices'
+    ? `角色分离 (${tokenCount}台)`
+    : tokenMode === 'mixed'
+      ? `混合兼容 (${tokenCount}台)`
+      : `旧共享 Token (${tokenCount}个)`;
+  console.log(`║  🔑 模式: ${authLabel.padEnd(30)}║`);
   if (USE_TLS) console.log('║  🔒 TLS 加密已启用                       ║');
   console.log(`║  🛡  速率限制: ${String(rl.threshold + '次/' + (rl.windowMs/1000) + 's → 封' + (rl.blockMs/1000) + 's').padEnd(25)}║`);
   console.log('╚══════════════════════════════════════════╝');

@@ -47,6 +47,8 @@ if (process.env.CLAUDE_WEB_TOKEN) {
   config.token = process.env.CLAUDE_WEB_TOKEN;
 } else if (config.agentToken) {
   config.token = config.agentToken;
+} else if (!config.token && config.devices && Object.keys(config.devices).length === 1) {
+  config.token = Object.values(config.devices)[0]?.agentToken;
 } else if (!config.token && config.tokens && Object.keys(config.tokens).length === 1) {
   config.token = Object.keys(config.tokens)[0];
 }
@@ -70,6 +72,10 @@ function failConfig(message) {
 if (config.tokens && Object.keys(config.tokens).length > 1 &&
     !process.env.CLAUDE_WEB_TOKEN && !config.agentToken && !config.token) {
   failConfig('配置了多个 tokens 时，Agent 必须设置 agentToken 或 CLAUDE_WEB_TOKEN');
+}
+if (config.devices && Object.keys(config.devices).length > 1 &&
+    !process.env.CLAUDE_WEB_TOKEN && !config.agentToken && !config.token) {
+  failConfig('配置了多个 devices 时，Agent 必须设置 agentToken 或 CLAUDE_WEB_TOKEN');
 }
 if (!token || typeof token !== 'string' || token.length < 32 || /change-me|deprecated|your-token/i.test(token)) {
   failConfig('token 必须存在、至少 32 个字符，且不能使用示例值');

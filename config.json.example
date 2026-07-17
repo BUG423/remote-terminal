@@ -6,13 +6,17 @@
   "bindHost": "127.0.0.1",
   "_server_listen_comment": "Server 只监听本机 3002，由 Nginx 在 443 提供 HTTPS/WSS",
 
-  "tokens": {
-    "change-me-generate-a-random-token-01": "受控服务器 A"
+  "devices": {
+    "server-a": {
+      "name": "受控服务器 A",
+      "browserToken": "change-me-browser-random-token-01",
+      "agentToken": "change-me-agent-random-token-02"
+    }
   },
-  "_tokens_comment": "Server 的 Token 到 Agent 名称映射。Token 必须为 32-512 字符且不能是示例值",
+  "_devices_comment": "每台设备使用彼此不同的浏览器和 Agent Token，防止浏览器凭据伪装 Agent",
 
-  "agentToken": "change-me-generate-a-random-token-01",
-  "_agent_token_comment": "Agent 使用的 Token。多 Agent 时，每台机器只保留自己的 Token；也可用 CLAUDE_WEB_TOKEN",
+  "agentToken": "change-me-agent-random-token-02",
+  "_agent_token_comment": "Agent 使用 devices 中对应的 agentToken；也可用 CLAUDE_WEB_TOKEN 覆盖",
 
   "serverUrl": "wss://terminal.example.com",
   "_server_url_comment": "Agent 主动连接的完整地址，推荐 WSS 443，可带路径。CW_SERVER_URL 可覆盖",

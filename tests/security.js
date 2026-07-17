@@ -19,7 +19,8 @@ let testToken = process.env.CLAUDE_WEB_TOKEN;
 try {
   if (!testToken) {
     const cfg = require('../config.json');
-    testToken = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
+    const firstDevice = cfg.devices && Object.values(cfg.devices)[0];
+    testToken = firstDevice?.browserToken || (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
   }
 } catch {
   console.error('❌ 未设置 CLAUDE_WEB_TOKEN，且无法读取 config.json');

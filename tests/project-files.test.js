@@ -27,6 +27,9 @@ test('config.json.example 是合法 JSON', () => {
   const config = JSON.parse(fs.readFileSync(path.join(root, 'config.json.example'), 'utf8'));
   assert.equal(config.bindHost, '127.0.0.1');
   assert.equal(config.enableLegacyChat, false);
+  const device = config.devices['server-a'];
+  assert.notEqual(device.browserToken, device.agentToken);
+  assert.equal(config.agentToken, device.agentToken);
 });
 
 for (const file of ['deploy.sh', 'start-local.sh', 'scripts/run-server-tests.sh']) {

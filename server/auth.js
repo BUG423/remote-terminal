@@ -1,124 +1,165 @@
+'use strict';
+
 const crypto = require('crypto');
 
-/**
- * Token-based authentication — 支持单 Token 和多 Token 两种模式。
- *
- * 多 Token 模式（推荐）：
- *   每个 Agent 分配独立 Token，浏览器输入哪个 Token 就连到哪个 Agent。
- *   config.json: { "tokens": { "tok-abc": "办公室", "tok-xyz": "家里" } }
- *
- * 单 Token 模式（兼容旧版）：
- *   所有 Agent 和浏览器共用同一个 Token。
- *   config.json: { "token": "shared-secret" }
- *
- * 时序安全说明：
- *   校验时统一先把输入 token 做 SHA-256（固定 32 字节），再在“摘要 → 条目”表里查找。
- *   查表始终发生在等长的摘要上，不随真实 token 的内容/长度产生可测量的时序差异，
- *   命中后再对原始值做定长 timingSafeEqual 二次确认，杜绝时序侧信道与摘要碰撞的理论风险。
- */
-
-const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest();
-const sha256hex = (s) => sha256(s).toString('hex');
+const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest();
+const sha256hex = (value) => sha256(value).toString('hex');
 const isValidToken = (token) => typeof token === 'string' &&
   token.length >= 32 && token.length <= 512 &&
   !/change-me|deprecated|your-token|shared-secret/i.test(token);
 
+/**
+ * Recommended configuration:
+ * {
+ *   "devices": {
+ *     "production-a": {
+ *       "name": "Production A",
+ *       "browserToken": "...",
+ *       "agentToken": "...different secret..."
+ *     }
+ *   }
+ * }
+ *
+ * Legacy `tokens` and `token` values remain accepted for migration. A legacy
+ * token is intentionally valid for both roles and therefore offers weaker
+ * Agent identity protection.
+ */
 function createAuthMiddleware(config) {
-  const tokens = config.tokens;
-  const legacyToken = config.token;
-
-  // 先收集「原始 token → 显示名」，并做长度 / 默认值校验
+  /** @type {Map<string, {name:string, token:string, routingKey:string, roles:Set<string>}>} */
+  const credentials = new Map();
   /** @type {Map<string, string>} */
-  const raw = new Map();
+  const routeNames = new Map();
+  let deviceCredentials = 0;
+  let legacyCredentials = 0;
 
-  if (tokens && typeof tokens === 'object') {
-    for (const [tok, name] of Object.entries(tokens)) {
-      if (isValidToken(tok)) raw.set(tok, String(name || '').slice(0, 120));
-      else console.warn(`⚠  Token 被忽略（长度无效或仍为示例值）: "${String(tok).slice(0, 8)}..."`);
+  function addCredential(token, name, routingKey, role) {
+    if (!isValidToken(token)) return false;
+    const digest = sha256hex(token);
+    const existing = credentials.get(digest);
+    if (existing) {
+      if (existing.token !== token || existing.routingKey !== routingKey) {
+        console.error('❌ 检测到重复凭据被分配给不同设备，已拒绝该配置项');
+        return false;
+      }
+      existing.roles.add(role);
+      return true;
+    }
+    credentials.set(digest, {
+      name: String(name || 'unknown').slice(0, 120),
+      token,
+      routingKey,
+      roles: new Set([role]),
+    });
+    routeNames.set(routingKey, String(name || 'unknown').slice(0, 120));
+    return true;
+  }
+
+  const devices = config.devices;
+  if (devices && typeof devices === 'object' && !Array.isArray(devices)) {
+    for (const [deviceId, device] of Object.entries(devices)) {
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(deviceId) || !device || typeof device !== 'object') {
+        console.warn(`⚠  忽略无效设备配置: ${String(deviceId).slice(0, 32)}`);
+        continue;
+      }
+      const browserToken = device.browserToken;
+      const agentToken = device.agentToken;
+      if (!isValidToken(browserToken) || !isValidToken(agentToken) || browserToken === agentToken) {
+        console.warn(`⚠  忽略设备 ${deviceId}：browserToken/agentToken 必须有效且彼此不同`);
+        continue;
+      }
+      if (credentials.has(sha256hex(browserToken)) || credentials.has(sha256hex(agentToken))) {
+        console.warn(`⚠  忽略设备 ${deviceId}：凭据已被其他设备使用`);
+        continue;
+      }
+
+      const routingKey = sha256hex(`device:${deviceId}`);
+      const name = device.name || deviceId;
+      const browserAdded = addCredential(browserToken, name, routingKey, 'browser');
+      const agentAdded = addCredential(agentToken, name, routingKey, 'agent');
+      if (browserAdded && agentAdded) deviceCredentials++;
     }
   }
 
-  // 兼容旧版单 token
-  if (legacyToken && !raw.has(legacyToken)) {
+  const legacyTokens = config.tokens;
+  if (legacyTokens && typeof legacyTokens === 'object' && !Array.isArray(legacyTokens)) {
+    for (const [token, name] of Object.entries(legacyTokens)) {
+      if (!isValidToken(token)) {
+        console.warn(`⚠  旧 Token 被忽略（长度无效或仍为示例值）: "${String(token).slice(0, 8)}..."`);
+        continue;
+      }
+      const routingKey = sha256hex(`legacy:${token}`);
+      if (addCredential(token, name, routingKey, 'browser') &&
+          addCredential(token, name, routingKey, 'agent')) {
+        legacyCredentials++;
+      }
+    }
+  }
+
+  const legacyToken = config.token;
+  if (legacyToken) {
     if (!isValidToken(legacyToken)) {
-      console.error('❌ Token 无效！必须为 32-512 个字符且不能使用示例值。请使用以下命令生成强 Token:');
-      console.error('   node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
-      process.exit(1);
+      console.error('❌ 旧单 Token 无效：必须为 32-512 个字符且不能使用示例值');
+    } else {
+      const routingKey = sha256hex(`legacy:${legacyToken}`);
+      if (addCredential(legacyToken, 'default', routingKey, 'browser') &&
+          addCredential(legacyToken, 'default', routingKey, 'agent')) {
+        legacyCredentials++;
+      }
     }
-    raw.set(legacyToken, 'default');
   }
 
-  const mode = tokens ? 'multi' : 'single';
-
-  if (raw.size === 0) {
-    console.error('❌ 未配置任何有效 Token！请在 config.json 中设置 tokens 或 token。');
-    console.error('   生成强 Token: node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
-    process.exit(1);
-  } else if (mode === 'single' && legacyToken === 'your-shared-secret-token-change-me') {
-    console.error('❌ 使用默认 Token！这存在严重安全风险。请生成强 Token并更新 config.json:');
-    console.error('   node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
+  if (credentials.size === 0) {
+    console.error('❌ 未配置任何有效凭据！推荐在 config.json 中设置 devices。');
+    console.error('   生成强 Token: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"');
     process.exit(1);
   }
 
-  // 以 SHA-256 摘要（64 hex）为键建索引，查表时序与真实 token 无关
-  /** @type {Map<string, {name: string, token: string}>} */
-  const digestMap = new Map();
-  for (const [tok, name] of raw) {
-    digestMap.set(sha256hex(tok), { name, token: tok });
-  }
+  const mode = deviceCredentials > 0
+    ? (legacyCredentials > 0 ? 'mixed' : 'devices')
+    : 'legacy';
 
   return {
-    /**
-     * 验证 Token（单/多模式统一走定长摘要查表 + timing-safe 二次确认）。
-     * @returns {{ valid: true, name: string, token: string } | { valid: false }}
-     */
-    verify(providedToken) {
-      if (!providedToken || typeof providedToken !== 'string') return { valid: false };
-
-      const entry = digestMap.get(sha256hex(providedToken));
+    verify(providedToken, role) {
+      if (!providedToken || typeof providedToken !== 'string' || !['browser', 'agent'].includes(role)) {
+        return { valid: false };
+      }
+      const entry = credentials.get(sha256hex(providedToken));
       if (!entry) return { valid: false };
 
-      // 命中后对原始值做定长恒定时间比较（防御摘要碰撞的理论情形）
-      const a = Buffer.from(providedToken);
-      const b = Buffer.from(entry.token);
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { valid: false };
+      const provided = Buffer.from(providedToken);
+      const expected = Buffer.from(entry.token);
+      if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+        return { valid: false };
+      }
+      if (!entry.roles.has(role)) return { valid: false };
 
-      return { valid: true, name: entry.name || 'unknown', token: entry.token };
+      return {
+        valid: true,
+        name: entry.name,
+        routingKey: entry.routingKey,
+      };
     },
 
-    /**
-     * 获取 Token 对应的 Agent 名称（用于显示）。
-     */
     getName(providedToken) {
-      const entry = digestMap.get(sha256hex(providedToken || ''));
-      return entry ? (entry.name || 'unknown') : 'unknown';
+      const entry = credentials.get(sha256hex(providedToken || ''));
+      return entry ? entry.name : 'unknown';
     },
 
-    /**
-     * 返回所有 Token 列表（不含密钥，仅名称）。
-     */
     listTokens() {
-      return [...digestMap.values()].map((v) => v.name);
+      return [...routeNames.values()];
     },
 
-    /**
-     * Token 数量。
-     */
     get tokenCount() {
-      return digestMap.size;
+      return routeNames.size;
     },
 
-    /**
-     * 当前模式。
-     */
     get mode() {
       return mode;
     },
 
-    /** 生成连接 ID */
     generateSessionId() {
       return crypto.randomUUID();
-    }
+    },
   };
 }
 

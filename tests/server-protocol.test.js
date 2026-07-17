@@ -12,7 +12,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const WebSocket = require('./ws-client');
 
-const token = 'test-token-1234567890abcdefghijklmnop';
+const browserToken = `browser-${'b'.repeat(40)}`;
+const agentToken = `agent-${'a'.repeat(40)}`;
 const port = 32000 + Math.floor(Math.random() * 1000);
 const configPath = path.join(os.tmpdir(), `remote-terminal-test-${process.pid}.json`);
 const target = `ws://127.0.0.1:${port}`;
@@ -20,7 +21,9 @@ const target = `ws://127.0.0.1:${port}`;
 fs.writeFileSync(configPath, JSON.stringify({
   port,
   bindHost: '127.0.0.1',
-  tokens: { [token]: 'test-agent' },
+  devices: {
+    'test-agent': { name: 'test-agent', browserToken, agentToken },
+  },
   serverHost: '127.0.0.1',
   serverPort: port,
   useTLS: false,
@@ -79,7 +82,7 @@ function httpGet(pathname) {
   });
 }
 
-function connect(role, authToken = token) {
+function connect(role, authToken = role === 'agent' ? agentToken : browserToken) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(target);
     const timer = setTimeout(() => reject(new Error(`${role} auth timeout`)), 5000);
@@ -147,6 +150,13 @@ function nextMessage(ws, predicate, timeoutMs = 5000) {
   check('无效 role 被拒绝', invalidRole.msg.type === 'error' && invalidRole.msg.message === 'Invalid role');
   invalidRole.ws.close();
 
+  const browserCannotBeAgent = await connect('agent', browserToken);
+  check('浏览器凭据不能伪装 Agent', browserCannotBeAgent.msg.message === 'Invalid token');
+  browserCannotBeAgent.ws.close();
+  const agentCannotBeBrowser = await connect('browser', agentToken);
+  check('Agent 凭据不能登录浏览器', agentCannotBeBrowser.msg.message === 'Invalid token');
+  agentCannotBeBrowser.ws.close();
+
   const agent = await connect('agent');
   check('假 Agent 鉴权成功', agent.msg.type === 'auth_ok' && agent.msg.role === 'agent');
 
@@ -206,7 +216,7 @@ function nextMessage(ws, predicate, timeoutMs = 5000) {
   browser3.ws.close();
 
   const repeatedAuth = nextMessage(browser2.ws, (m) => m.type === 'error' && m.message === 'Already authenticated');
-  browser2.ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+  browser2.ws.send(JSON.stringify({ type: 'auth', token: browserToken, role: 'agent' }));
   check('已鉴权连接不能再次鉴权切换角色', !!(await repeatedAuth));
   browser2.ws.close();
 
