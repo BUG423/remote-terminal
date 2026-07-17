@@ -8,6 +8,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
+    "https-proxy-agent": "^9.1.0",
     "node-pty": "^1.1.0",
     "ws": "^8.18.0"
   }

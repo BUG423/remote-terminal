@@ -24,6 +24,8 @@ fs.writeFileSync(configPath, JSON.stringify({
   serverHost: '127.0.0.1',
   serverPort: port,
   useTLS: false,
+  maxSessions: 3,
+  maxBrowsersPerToken: 2,
   workspaceRoot: path.join(os.tmpdir(), `remote-terminal-ws-${process.pid}`),
 }, null, 2));
 
@@ -146,6 +148,40 @@ function nextMessage(ws, predicate, timeoutMs = 5000) {
   browser.ws.send(JSON.stringify({ type: 'terminal_create', sessionId: 'valid-id', title: longTitle }));
   const createMsg = await forwarded;
   check('超长标题被截断后转发', createMsg.title.length === 120);
+
+  const outputRejected = nextMessage(agent.ws, (m) => m.type === 'error' && m.message === 'Invalid terminal output');
+  agent.ws.send(JSON.stringify({ type: 'terminal_output', sessionId: 'same-1', data: 'x'.repeat(129 * 1024) }));
+  check('Agent 超大输出被拒绝', !!(await outputRejected));
+
+  const validOutput = nextMessage(browser.ws, (m) => m.type === 'terminal_output' && m.sessionId === 'same-1');
+  agent.ws.send(JSON.stringify({ type: 'terminal_output', sessionId: 'same-1', data: 'VALID_OUTPUT' }));
+  check('合法 Agent 输出正常转发', (await validOutput).data === 'VALID_OUTPUT');
+
+  const cappedSessions = [0, 1, 2, 3].map((i) => ({
+    id: `cap-${i}`,
+    title: `Cap ${i}`,
+    cwd: '/tmp/ws',
+    status: 'running',
+    pid: i + 1,
+  }));
+  agent.ws.send(JSON.stringify({ type: 'sessions', sessions: cappedSessions }));
+  const cappedUpdate = await nextMessage(browser.ws, (m) => m.type === 'sessions');
+  check('Agent 会话列表受上限保护', cappedUpdate.sessions.length === 3);
+
+  browser.ws.send(JSON.stringify({ type: 'terminal_create', sessionId: 'over-limit', title: 'Over' }));
+  const overLimit = await nextMessage(browser.ws, (m) => m.type === 'terminal_error' && m.sessionId === 'over-limit');
+  check('达到会话上限后拒绝继续创建', /上限/.test(overLimit.message));
+
+  const browser2 = await connect('browser');
+  check('上限内第二个浏览器可连接', browser2.msg.type === 'auth_ok');
+  const browser3 = await connect('browser');
+  check('超过每 Token 浏览器连接上限后被拒绝', browser3.msg.message === 'Too many browser connections');
+  browser3.ws.close();
+
+  const repeatedAuth = nextMessage(browser2.ws, (m) => m.type === 'error' && m.message === 'Already authenticated');
+  browser2.ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+  check('已鉴权连接不能再次鉴权切换角色', !!(await repeatedAuth));
+  browser2.ws.close();
 
   agent.ws.close();
   browser.ws.close();

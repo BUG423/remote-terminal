@@ -19,6 +19,9 @@ const crypto = require('crypto');
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest();
 const sha256hex = (s) => sha256(s).toString('hex');
+const isValidToken = (token) => typeof token === 'string' &&
+  token.length >= 32 && token.length <= 512 &&
+  !/change-me|deprecated|your-token|shared-secret/i.test(token);
 
 function createAuthMiddleware(config) {
   const tokens = config.tokens;
@@ -30,15 +33,15 @@ function createAuthMiddleware(config) {
 
   if (tokens && typeof tokens === 'object') {
     for (const [tok, name] of Object.entries(tokens)) {
-      if (tok && tok.length >= 32) raw.set(tok, String(name || ''));
-      else console.warn(`⚠  Token 被忽略（长度不足32字符）: "${String(tok).slice(0, 8)}..."`);
+      if (isValidToken(tok)) raw.set(tok, String(name || '').slice(0, 120));
+      else console.warn(`⚠  Token 被忽略（长度无效或仍为示例值）: "${String(tok).slice(0, 8)}..."`);
     }
   }
 
   // 兼容旧版单 token
   if (legacyToken && !raw.has(legacyToken)) {
-    if (legacyToken.length < 32) {
-      console.error('❌ Token 长度不足！必须至少32个字符。请使用以下命令生成强 Token:');
+    if (!isValidToken(legacyToken)) {
+      console.error('❌ Token 无效！必须为 32-512 个字符且不能使用示例值。请使用以下命令生成强 Token:');
       console.error('   node -e "console.log(require(\'crypto\').randomBytes(24).toString(\'base64url\'))"');
       process.exit(1);
     }

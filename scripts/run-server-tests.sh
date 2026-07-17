@@ -58,7 +58,10 @@ echo "== real e2e =="
 TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${TOKEN}" WORKSPACE_ROOT="${WORKSPACE_ROOT}" node tests/e2e.js
 
 echo "== security =="
-TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${TOKEN}" node tests/security.js
+TARGET="ws://127.0.0.1:${PORT}" CLAUDE_WEB_TOKEN="${TOKEN}" CW_AUDIT_LOG="${WORKSPACE_ROOT}/.audit.log" node tests/security.js
+
+echo "== real relay restart recovery =="
+node tests/relay-restart.test.js
 
 echo "== port cleanup check =="
 cleanup

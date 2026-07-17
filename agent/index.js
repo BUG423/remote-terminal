@@ -17,6 +17,8 @@ const os = require('os');
 const WebSocket = require('ws');
 const sessionManager = require('./session-manager');
 const auditLog = require('./audit-log');
+const { OutputBacklog, splitUtf8 } = require('./output-backlog');
+const { buildServerUrl, createConnectionOptions, displayUrl } = require('./connection-options');
 
 // ─── 配置 ───────────────────────────────────────────────────────
 const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, '..', 'config.json');
@@ -40,25 +42,19 @@ try {
   } catch { /* 无 .env 文件则忽略 */ }
 })();
 
-// token 优先级：环境变量 > config.tokens（取第一个） > config.token（兼容旧版）
+// token 优先级：环境变量 > agentToken > config.token > 唯一的 config.tokens 条目。
 if (process.env.CLAUDE_WEB_TOKEN) {
   config.token = process.env.CLAUDE_WEB_TOKEN;
-} else if (!config.token && config.tokens) {
+} else if (config.agentToken) {
+  config.token = config.agentToken;
+} else if (!config.token && config.tokens && Object.keys(config.tokens).length === 1) {
   config.token = Object.keys(config.tokens)[0];
 }
 
 const {
   token,
-  serverHost,
-  serverPort = 3002,
-  useTLS = false,
   workspaceRoot,
 } = config;
-
-// useTLS=false + Nginx 代理 → 通过 CW_USE_WSS=true 仍可用 WSS 连接
-const useWSS = useTLS || process.env.CW_USE_WSS === 'true';
-const SERVER_URL = `${useWSS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
-const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
 
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 120;
@@ -71,15 +67,45 @@ function failConfig(message) {
   process.exit(1);
 }
 
-if (!token || typeof token !== 'string' || token.length < 32) {
-  failConfig('token 必须存在且至少 32 个字符');
+if (config.tokens && Object.keys(config.tokens).length > 1 &&
+    !process.env.CLAUDE_WEB_TOKEN && !config.agentToken && !config.token) {
+  failConfig('配置了多个 tokens 时，Agent 必须设置 agentToken 或 CLAUDE_WEB_TOKEN');
 }
-if (!serverHost || typeof serverHost !== 'string' || serverHost.includes('your-server')) {
-  failConfig('serverHost 必须设置为真实服务器 IP 或域名');
+if (!token || typeof token !== 'string' || token.length < 32 || /change-me|deprecated|your-token/i.test(token)) {
+  failConfig('token 必须存在、至少 32 个字符，且不能使用示例值');
 }
-if (!Number.isInteger(Number(serverPort)) || Number(serverPort) <= 0 || Number(serverPort) > 65535) {
-  failConfig('serverPort 必须是 1-65535 之间的端口');
+
+let SERVER_URL;
+let WS_OPTIONS;
+let proxyUrl;
+try {
+  SERVER_URL = buildServerUrl(config);
+  ({ options: WS_OPTIONS, proxyUrl } = createConnectionOptions(SERVER_URL, config));
+} catch (err) {
+  failConfig(err.message);
 }
+
+const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
+auditLog.configure({
+  path: process.env.CW_AUDIT_LOG || config.auditLogPath || path.join(ROOT, '.audit.log'),
+  maxBytes: Number(process.env.CW_AUDIT_MAX_BYTES || config.auditMaxBytes) || 10 * 1024 * 1024,
+  enabled: config.auditEnabled !== false && process.env.CW_AUDIT_ENABLED !== 'false',
+});
+
+function positiveInt(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+const MAX_SESSIONS = positiveInt(process.env.CW_MAX_SESSIONS || config.maxSessions, 12, 1, 100);
+const OFFLINE_OUTPUT_BYTES = positiveInt(
+  process.env.CW_OFFLINE_OUTPUT_BYTES || config.offlineOutputBytes,
+  256 * 1024,
+  16 * 1024,
+  4 * 1024 * 1024
+);
+const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
+const offlineOutput = new OutputBacklog(OFFLINE_OUTPUT_BYTES);
 
 function byteLength(value) {
   return Buffer.byteLength(String(value || ''), 'utf8');
@@ -101,6 +127,8 @@ function sanitizeTitle(title) {
 let ws = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
+let authenticated = false;
+let shuttingDown = false;
 let lastPongAt = 0;        // 最近一次收到服务器 pong 的时间戳
 const MAX_RECONNECT_DELAY = 30000;
 const HEARTBEAT_MS = Number(process.env.CW_HEARTBEAT_MS) || 25000;       // 每 25s 发一次心跳
@@ -111,22 +139,31 @@ const chatProcesses = new Map(); // sessionId -> { proc, queue, history }
 
 // ─── WebSocket 连接 ─────────────────────────────────────────────
 function connect() {
-  console.log(`🔗 正在连接服务器: ${SERVER_URL}`);
-  ws = new WebSocket(SERVER_URL);
+  if (shuttingDown) return;
+  console.log(`🔗 正在连接服务器: ${displayUrl(SERVER_URL)}`);
+  let socket;
+  try {
+    socket = new WebSocket(SERVER_URL, WS_OPTIONS);
+  } catch (err) {
+    console.error('⚠  创建 WebSocket 连接失败:', err.message);
+    scheduleReconnect();
+    return;
+  }
+  ws = socket;
 
-  ws.on('open', () => {
+  socket.on('open', () => {
     console.log('✅ 已连接到服务器');
     reconnectAttempts = 0;
     lastPongAt = Date.now();
     // 开启 TCP keepalive，让操作系统也能较快发现死链
-    try { ws._socket && ws._socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
-    ws.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
+    try { socket._socket && socket._socket.setKeepAlive(true, 15000); } catch { /* ignore */ }
+    socket.send(JSON.stringify({ type: 'auth', token, role: 'agent' }));
   });
 
   // 协议层 pong（服务器若用 ws.ping() 探测，这里自动回应并记录存活）
-  ws.on('pong', () => { lastPongAt = Date.now(); });
+  socket.on('pong', () => { lastPongAt = Date.now(); });
 
-  ws.on('message', (raw) => {
+  socket.on('message', (raw) => {
     let data;
     try {
       data = JSON.parse(raw.toString());
@@ -137,9 +174,10 @@ function connect() {
     handleMessage(data);
   });
 
-  ws.on('close', (code) => {
+  socket.on('close', (code) => {
     console.log(`🔌 与服务器断开 (code: ${code})`);
-    ws = null;
+    authenticated = false;
+    if (ws === socket) ws = null;
     // code 4000 = 服务器端 "New agent connected"：已有另一个 Agent 接管。
     // 若此时自动重连，会和对方互相踢下线形成每秒乒乓循环，导致会话错乱。
     // 因此被踢的 Agent 停止重连、进入空闲，确保全局只有一个活跃 Agent。
@@ -149,17 +187,18 @@ function connect() {
       console.warn('⚠  请确认只运行一个 Agent；如需本机接管，请先停止另一个 Agent 再重启本进程。');
       return;
     }
-    scheduleReconnect();
+    if (!shuttingDown) scheduleReconnect();
   });
 
-  ws.on('error', (err) => {
+  socket.on('error', (err) => {
     console.error('⚠  WebSocket 错误:', err.message);
   });
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) return;
-  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+  if (reconnectTimer || shuttingDown) return;
+  const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+  const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
   reconnectAttempts++;
   console.log(`🔄 ${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)...`);
   reconnectTimer = setTimeout(() => {
@@ -169,9 +208,13 @@ function scheduleReconnect() {
 }
 
 function send(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-    return true;
+  if (authenticated && ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(data));
+      return true;
+    } catch (err) {
+      console.warn('⚠  WebSocket 发送失败:', err.message);
+    }
   }
   return false;
 }
@@ -202,13 +245,40 @@ function flushOutput(sessionId) {
   const b = outBuffers.get(sessionId);
   if (!b) return;
   if (b.timer) { clearTimeout(b.timer); b.timer = null; }
-  if (b.data) { send({ type: 'terminal_output', sessionId, data: b.data }); b.data = ''; }
+  if (b.data) {
+    const data = b.data;
+    b.data = '';
+    sendOutputData(sessionId, data, false);
+  }
+}
+
+function sendOutputData(sessionId, data, recovered) {
+  const chunks = splitUtf8(data, OUT_MAX_BYTES);
+  for (let i = 0; i < chunks.length; i++) {
+    if (!send({ type: 'terminal_output', sessionId, data: chunks[i], ...(recovered ? { recovered: true } : {}) })) {
+      offlineOutput.append(sessionId, chunks.slice(i).join(''));
+      return false;
+    }
+  }
+  return true;
 }
 
 function dropOutputBuffer(sessionId) {
   const b = outBuffers.get(sessionId);
   if (b && b.timer) clearTimeout(b.timer);
   outBuffers.delete(sessionId);
+  offlineOutput.drop(sessionId);
+}
+
+function flushOfflineOutput() {
+  const entries = offlineOutput.drain();
+  for (let i = 0; i < entries.length; i++) {
+    const [sessionId, data] = entries[i];
+    if (!sendOutputData(sessionId, data, true)) {
+      for (let j = i + 1; j < entries.length; j++) offlineOutput.append(entries[j][0], entries[j][1]);
+      break;
+    }
+  }
 }
 
 // ─── 消息处理 ───────────────────────────────────────────────────
@@ -216,9 +286,11 @@ function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
       console.log('🤖 Agent 认证成功');
+      authenticated = true;
       // 清理可能残留的异常状态会话，然后上报
       sessionManager.cleanStaleSessions();
       reportSessions();
+      flushOfflineOutput();
       break;
 
     // ── 终端：创建 ────────────────────────────────────────────
@@ -271,7 +343,8 @@ function handleMessage(data) {
 
     // ── 旧聊天协议 ────────────────────────────────────────────
     case 'chat':
-      handleChatMessage(data);
+      if (ENABLE_LEGACY_CHAT) handleChatMessage(data);
+      else send({ type: 'terminal_error', sessionId: data.sessionId, message: '旧聊天协议未启用' });
       break;
 
     case 'pong':
@@ -296,6 +369,15 @@ function onTerminalCreate(data) {
     const s = sessionManager.getSession(sessionId);
     send({ type: 'terminal_created', sessionId, title: s.title, cwd: s.cwd, pid: s.pid, status: s.status });
     reportSessions();
+    return;
+  }
+
+  if (sessionManager.listSessions().length >= MAX_SESSIONS) {
+    send({
+      type: 'terminal_error',
+      sessionId,
+      message: `会话数量已达上限 (${MAX_SESSIONS})，请先删除不再使用的会话`,
+    });
     return;
   }
 
@@ -455,10 +537,12 @@ const cleaned = sessionManager.cleanStaleSessions();
 console.log('');
 console.log('╔══════════════════════════════════════════╗');
 console.log('║         Claude Web Agent 🤖              ║');
-console.log(`║  Server : ${SERVER_URL.padEnd(32)}║`);
+console.log(`║  Server : ${displayUrl(SERVER_URL).slice(0, 32).padEnd(32)}║`);
 console.log('║  Mode   : 交互式终端 (node-pty)           ║');
 console.log(`║  Root   : ${ROOT.slice(0, 32).padEnd(32)}║`);
 console.log(`║  📝 审计 : ${auditLog.logPath().slice(0, 30).padEnd(30)}║`);
+console.log(`║  会话上限: ${String(MAX_SESSIONS).padEnd(29)}║`);
+if (proxyUrl) console.log(`║  代理   : ${String(proxyUrl.protocol + '//' + proxyUrl.host).slice(0, 32).padEnd(32)}║`);
 console.log(`║  🧹 清理 : ${String(cleaned + '个残留').padEnd(30)}║`);
 console.log('╚══════════════════════════════════════════╝');
 console.log('');
@@ -467,7 +551,11 @@ connect();
 
 // ─── 优雅关闭 ───────────────────────────────────────────────────
 function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  authenticated = false;
   console.log('\n🛑 正在关闭 Agent...');
+  if (reconnectTimer) clearTimeout(reconnectTimer);
   sessionManager.destroyAllSessions();
   for (const [, s] of chatProcesses) if (s.proc) s.proc.kill('SIGTERM');
   if (ws) ws.close(1000, 'Agent shutting down');

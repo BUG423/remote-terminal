@@ -16,18 +16,30 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const AUDIT_LOG_PATH = process.env.CW_AUDIT_LOG ||
+let auditLogPath = process.env.CW_AUDIT_LOG ||
   path.join(os.homedir(), 'WebClaudeWorkspaces', '.audit.log');
+let maxLogBytes = 10 * 1024 * 1024;
+let maxBackups = 3;
+let enabled = process.env.CW_AUDIT_ENABLED !== 'false';
 
 // 每个会话的输入缓冲区：sessionId -> string
 const buffers = new Map();
+
+function configure(options = {}) {
+  if (options.path) auditLogPath = path.resolve(options.path);
+  if (Number.isInteger(options.maxBytes) && options.maxBytes >= 1024) maxLogBytes = options.maxBytes;
+  if (Number.isInteger(options.maxBackups) && options.maxBackups >= 1 && options.maxBackups <= 20) {
+    maxBackups = options.maxBackups;
+  }
+  if (typeof options.enabled === 'boolean') enabled = options.enabled;
+}
 
 /**
  * 喂入一块终端输入数据。当检测到 Enter（\r）时，
  * 把当前行清洗后写入审计日志。
  */
 function feed(sessionId, sessionTitle, chunk) {
-  if (!chunk) return;
+  if (!enabled || !chunk) return;
 
   let buf = buffers.get(sessionId) || '';
   buf += chunk;
@@ -80,12 +92,29 @@ function flushLine(sessionId, sessionTitle, rawLine) {
   }) + '\n';
 
   try {
-    const dir = path.dirname(AUDIT_LOG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(AUDIT_LOG_PATH, entry, 'utf-8');
+    const dir = path.dirname(auditLogPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    rotateIfNeeded(Buffer.byteLength(entry));
+    fs.appendFileSync(auditLogPath, entry, { encoding: 'utf-8', mode: 0o600 });
+    try { fs.chmodSync(auditLogPath, 0o600); } catch { /* 某些文件系统不支持 chmod */ }
   } catch (err) {
     console.error(`❌ 审计日志写入失败: ${err.message}`);
   }
+}
+
+function rotateIfNeeded(incomingBytes) {
+  let currentBytes = 0;
+  try { currentBytes = fs.statSync(auditLogPath).size; } catch { /* 文件尚不存在 */ }
+  if (currentBytes + incomingBytes <= maxLogBytes) return;
+
+  const oldest = `${auditLogPath}.${maxBackups}`;
+  try { fs.unlinkSync(oldest); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  for (let i = maxBackups - 1; i >= 1; i--) {
+    const from = `${auditLogPath}.${i}`;
+    const to = `${auditLogPath}.${i + 1}`;
+    try { fs.renameSync(from, to); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  }
+  try { fs.renameSync(auditLogPath, `${auditLogPath}.1`); } catch (err) { if (err.code !== 'ENOENT') throw err; }
 }
 
 /**
@@ -99,7 +128,7 @@ function clearSession(sessionId) {
  * 返回审计日志文件路径。
  */
 function logPath() {
-  return AUDIT_LOG_PATH;
+  return auditLogPath;
 }
 
-module.exports = { feed, clearSession, logPath };
+module.exports = { configure, feed, clearSession, logPath };

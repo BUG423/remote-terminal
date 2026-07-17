@@ -56,7 +56,12 @@ try {
 // token 可从环境变量覆盖（仅兼容旧单 token 模式）
 config.token = process.env.CLAUDE_WEB_TOKEN || config.token;
 
-const PORT = config.port || 3002;
+function positiveInt(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+const PORT = positiveInt(process.env.CW_PORT || config.port, 3002, 1, 65535);
 const BIND_HOST = config.bindHost || '127.0.0.1';
 const USE_TLS = config.useTLS === true;
 const TLS_OPTIONS = USE_TLS ? (() => {
@@ -73,11 +78,37 @@ const TLS_OPTIONS = USE_TLS ? (() => {
 
 const { verify, tokenCount, mode: tokenMode, generateSessionId } = createAuthMiddleware(config);
 
-// 每会话输出缓冲上限
-const SCROLLBACK_LIMIT = 200 * 1024;
+const SCROLLBACK_LIMIT_BYTES = positiveInt(
+  process.env.CW_SCROLLBACK_BYTES || config.scrollbackBytes,
+  256 * 1024,
+  16 * 1024,
+  4 * 1024 * 1024
+);
+const MAX_SESSIONS_PER_AGENT = positiveInt(
+  process.env.CW_MAX_SESSIONS || config.maxSessions,
+  12,
+  1,
+  100
+);
+const MAX_BROWSERS_PER_TOKEN = positiveInt(
+  process.env.CW_MAX_BROWSERS_PER_TOKEN || config.maxBrowsersPerToken,
+  8,
+  1,
+  100
+);
+const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 
 // ─── Express ────────────────────────────────────────────────────
 const app = express();
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
   let agentCount = 0;
@@ -101,10 +132,12 @@ if (USE_TLS) {
   server = http.createServer(app);
 }
 
-const MAX_WS_PAYLOAD_BYTES = Number(process.env.CW_MAX_WS_PAYLOAD_BYTES) || 1024 * 1024;
+const MAX_WS_PAYLOAD_BYTES = positiveInt(process.env.CW_MAX_WS_PAYLOAD_BYTES, 1024 * 1024, 64 * 1024, 8 * 1024 * 1024);
 const MAX_SESSION_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 120;
 const MAX_INPUT_BYTES = 64 * 1024;
+const MAX_AGENT_OUTPUT_BYTES = 128 * 1024;
+const MAX_CWD_LENGTH = 4096;
 const MAX_COLS = 300;
 const MAX_ROWS = 100;
 
@@ -170,7 +203,18 @@ function cancelDisconnectedCleanup(token) {
 function broadcastToBrowsers(token, data) {
   const payload = JSON.stringify(data);
   for (const [, b] of browserClients) {
-    if (b.token === token && b.ws.readyState === 1) b.ws.send(payload);
+    if (b.token === token) safeSend(b.ws, payload);
+  }
+}
+
+function safeSend(ws, payload) {
+  if (!ws || ws.readyState !== 1) return false;
+  try {
+    ws.send(payload);
+    return true;
+  } catch (err) {
+    console.warn('⚠  WebSocket 发送失败:', err.message);
+    return false;
   }
 }
 
@@ -178,8 +222,7 @@ function broadcastToBrowsers(token, data) {
 function sendToAgent(token, data) {
   const slot = agents.get(token);
   if (slot && slot.ws && slot.ws.readyState === 1) {
-    slot.ws.send(JSON.stringify(data));
-    return true;
+    return safeSend(slot.ws, JSON.stringify(data));
   }
   return false;
 }
@@ -187,9 +230,14 @@ function sendToAgent(token, data) {
 /** 追加滚动缓冲（按 Agent 隔离） */
 function appendScrollback(token, sessionId, chunk) {
   const slot = agents.get(token);
-  if (!slot) return;
+  if (!slot || !validSessionId(sessionId) || typeof chunk !== 'string') return;
   let buf = (slot.scrollback.get(sessionId) || '') + chunk;
-  if (buf.length > SCROLLBACK_LIMIT) buf = buf.slice(buf.length - SCROLLBACK_LIMIT);
+  const bytes = Buffer.from(buf, 'utf8');
+  if (bytes.length > SCROLLBACK_LIMIT_BYTES) {
+    let start = bytes.length - SCROLLBACK_LIMIT_BYTES;
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+    buf = bytes.subarray(start).toString('utf8');
+  }
   slot.scrollback.set(sessionId, buf);
 }
 
@@ -220,6 +268,7 @@ function sanitizeBrowserMessage(data) {
 
   if (type === 'ping' || type === 'terminal_list') return { ok: true, data: { type } };
   if (type === 'chat') {
+    if (!ENABLE_LEGACY_CHAT) return { ok: false, sessionId: data.sessionId, message: 'Legacy chat is disabled' };
     if (!validSessionId(data.sessionId)) return { ok: false, message: 'Invalid sessionId' };
     if (typeof data.message !== 'string' || byteLength(data.message) > MAX_INPUT_BYTES) {
       return { ok: false, sessionId: data.sessionId, message: 'Invalid chat message' };
@@ -260,6 +309,32 @@ function sanitizeBrowserMessage(data) {
   }
 }
 
+function sanitizeSession(session) {
+  if (!session || !validSessionId(session.id)) return null;
+  if (!['running', 'exited', 'disconnected'].includes(session.status)) return null;
+  return {
+    id: session.id,
+    title: (typeof session.title === 'string' ? session.title : '新会话').slice(0, MAX_TITLE_LENGTH),
+    cwd: (typeof session.cwd === 'string' ? session.cwd : '').slice(0, MAX_CWD_LENGTH),
+    pid: Number.isInteger(session.pid) && session.pid >= 0 ? session.pid : null,
+    status: session.status,
+    createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
+  };
+}
+
+function sanitizeSessionList(value) {
+  const raw = Array.isArray(value) ? value.slice(0, MAX_SESSIONS_PER_AGENT) : [];
+  const seenIds = new Set();
+  const sessions = [];
+  for (const item of raw) {
+    const session = sanitizeSession(item);
+    if (!session || seenIds.has(session.id)) continue;
+    seenIds.add(session.id);
+    sessions.push(session);
+  }
+  return sessions;
+}
+
 // ─── WebSocket 处理 ─────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
@@ -285,7 +360,7 @@ wss.on('connection', (ws, req) => {
 
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Authentication timeout' }));
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Authentication timeout' }));
       ws.close(4001, 'Authentication timeout');
     }
   }, 10000);
@@ -296,14 +371,19 @@ wss.on('connection', (ws, req) => {
     try {
       data = JSON.parse(raw.toString());
     } catch {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
       return;
     }
 
     // ── 鉴权 ───────────────────────────────────────────────
     if (data.type === 'auth') {
+      if (authenticated) {
+        safeSend(ws, JSON.stringify({ type: 'error', message: 'Already authenticated' }));
+        ws.close(4002, 'Already authenticated');
+        return;
+      }
       if (!['browser', 'agent'].includes(data.role)) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid role' }));
+        safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid role' }));
         ws.close(4001, 'Invalid role');
         return;
       }
@@ -311,7 +391,7 @@ wss.on('connection', (ws, req) => {
       const blocked = rateLimiter.checkBlocked(clientIp);
       if (blocked.blocked) {
         console.warn(`🚫 拒绝认证: ${clientId} (${clientIp}): ${blocked.reason}`);
-        ws.send(JSON.stringify({ type: 'error', message: blocked.reason }));
+        safeSend(ws, JSON.stringify({ type: 'error', message: blocked.reason }));
         ws.close(4001, 'Rate limited');
         return;
       }
@@ -319,8 +399,14 @@ wss.on('connection', (ws, req) => {
       const result = verify(data.token);
       if (!result.valid) {
         rateLimiter.recordFailed(clientIp);
-        ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+        safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid token' }));
         ws.close(4001, 'Invalid token');
+        return;
+      }
+
+      if (data.role === 'browser' && countBrowsersFor(result.token) >= MAX_BROWSERS_PER_TOKEN) {
+        safeSend(ws, JSON.stringify({ type: 'error', message: 'Too many browser connections' }));
+        ws.close(4003, 'Too many browser connections');
         return;
       }
 
@@ -340,7 +426,7 @@ wss.on('connection', (ws, req) => {
         // Agent 重连，取消残留会话清理定时器
         cancelDisconnectedCleanup(boundToken);
         console.log(`🤖 Agent 已连接: ${result.name || boundToken.slice(0,8)} (token: ${boundToken.slice(0,8)}…)`);
-        ws.send(JSON.stringify({ type: 'auth_ok', role: 'agent' }));
+        safeSend(ws, JSON.stringify({ type: 'auth_ok', role: 'agent' }));
         // 通知该 Token 的浏览器：Agent 上线
         broadcastToBrowsers(boundToken, { type: 'agent_status', online: true, agentName: slot.name });
         // 请求 Agent 上报会话（Agent 重新上报后会覆盖服务器缓存的旧列表）
@@ -355,7 +441,7 @@ wss.on('connection', (ws, req) => {
         const browserSessions = (agentOnline && slot)
           ? slot.sessions.filter(s => s.status !== 'disconnected')
           : [];
-        ws.send(JSON.stringify({
+        safeSend(ws, JSON.stringify({
           type: 'auth_ok',
           role: 'browser',
           clientId,
@@ -368,7 +454,7 @@ wss.on('connection', (ws, req) => {
     }
 
     if (!authenticated) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated' }));
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Not authenticated' }));
       return;
     }
 
@@ -376,7 +462,7 @@ wss.on('connection', (ws, req) => {
     if (clientType === 'browser') {
       const checked = sanitizeBrowserMessage(data);
       if (!checked.ok) {
-        ws.send(JSON.stringify({ type: 'terminal_error', sessionId: checked.sessionId, message: checked.message }));
+        safeSend(ws, JSON.stringify({ type: 'terminal_error', sessionId: checked.sessionId, message: checked.message }));
         return;
       }
       const msg = checked.data;
@@ -388,13 +474,25 @@ wss.on('connection', (ws, req) => {
         case 'terminal_delete':
         case 'terminal_list':
         case 'chat': {
+          if (msg.type === 'terminal_create') {
+            const slot = agents.get(boundToken);
+            const alreadyExists = slot && slot.sessions.some((session) => session.id === msg.sessionId);
+            if (!alreadyExists && slot && slot.sessions.length >= MAX_SESSIONS_PER_AGENT) {
+              safeSend(ws, JSON.stringify({
+                type: 'terminal_error',
+                sessionId: msg.sessionId,
+                message: `会话数量已达上限 (${MAX_SESSIONS_PER_AGENT})`,
+              }));
+              break;
+            }
+          }
           if (msg.type === 'terminal_delete') {
             const slot = agents.get(boundToken);
             if (slot) slot.scrollback.delete(msg.sessionId);
           }
           const ok = sendToAgent(boundToken, msg);
           if (!ok) {
-            ws.send(JSON.stringify({
+            safeSend(ws, JSON.stringify({
               type: 'terminal_error',
               sessionId: msg.sessionId,
               message: 'Agent 离线，操作未送达',
@@ -407,14 +505,14 @@ wss.on('connection', (ws, req) => {
           if (slot) {
             const buf = slot.scrollback.get(msg.sessionId);
             if (buf) {
-              ws.send(JSON.stringify({ type: 'terminal_output', sessionId: msg.sessionId, data: buf, replay: true }));
+              safeSend(ws, JSON.stringify({ type: 'terminal_output', sessionId: msg.sessionId, data: buf, replay: true }));
             }
           }
-          ws.send(JSON.stringify({ type: 'terminal_attached', sessionId: msg.sessionId }));
+          safeSend(ws, JSON.stringify({ type: 'terminal_attached', sessionId: msg.sessionId }));
           break;
         }
         case 'ping':
-          ws.send(JSON.stringify({ type: 'pong' }));
+          safeSend(ws, JSON.stringify({ type: 'pong' }));
           break;
       }
       return;
@@ -423,10 +521,22 @@ wss.on('connection', (ws, req) => {
     // ── Agent → 浏览器（仅限同 Token）────────────────────────
     if (clientType === 'agent') {
       switch (data.type) {
-        case 'terminal_output':
-          appendScrollback(boundToken, data.sessionId, data.data);
-          broadcastToBrowsers(boundToken, data);
+        case 'terminal_output': {
+          if (!validSessionId(data.sessionId) || typeof data.data !== 'string' ||
+              byteLength(data.data) > MAX_AGENT_OUTPUT_BYTES) {
+            safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid terminal output' }));
+            break;
+          }
+          const output = {
+            type: 'terminal_output',
+            sessionId: data.sessionId,
+            data: data.data,
+            ...(data.recovered === true ? { recovered: true } : {}),
+          };
+          appendScrollback(boundToken, output.sessionId, output.data);
+          broadcastToBrowsers(boundToken, output);
           break;
+        }
         case 'terminal_created':
         case 'terminal_exit':
         case 'terminal_closed':
@@ -434,6 +544,7 @@ wss.on('connection', (ws, req) => {
         case 'stream':
         case 'status':
         case 'error':
+          if (data.sessionId !== undefined && !validSessionId(data.sessionId)) break;
           if (data.type === 'terminal_closed') {
             const slot = agents.get(boundToken);
             if (slot) slot.scrollback.delete(data.sessionId);
@@ -443,25 +554,13 @@ wss.on('connection', (ws, req) => {
         case 'sessions': {
           const slot = agents.get(boundToken);
           if (slot) {
-            const raw = Array.isArray(data.sessions) ? data.sessions : [];
-            const seenIds = new Set();
-            slot.sessions = raw.filter(s => {
-              if (!s || !s.id) return false;
-              if (seenIds.has(s.id)) return false;
-              // 过滤掉异常状态（如 "recovered" 等 Agent 恢复功能产生的残留）
-              if (!['running', 'exited', 'disconnected'].includes(s.status)) {
-                console.log(`🧹 过滤异常状态会话: ${s.title} (${s.id.slice(0,8)}…) status=${s.status}`);
-                return false;
-              }
-              seenIds.add(s.id);
-              return true;
-            });
+            slot.sessions = sanitizeSessionList(data.sessions);
             broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
           }
           break;
         }
         case 'ping':
-          ws.send(JSON.stringify({ type: 'pong' }));
+          safeSend(ws, JSON.stringify({ type: 'pong' }));
           break;
       }
     }
@@ -497,7 +596,7 @@ function countBrowsersFor(token) {
 }
 
 // ─── 心跳 + 死连接清理 ──────────────────────────────────────────
-setInterval(() => {
+const heartbeatTimer = setInterval(() => {
   for (const ws of wss.clients) {
     if (ws.isAlive === false) {
       try { ws.terminate(); } catch { /* ignore */ }
@@ -558,12 +657,24 @@ if (redirectServer) {
   });
 }
 
-process.on('SIGINT', () => {
-  console.log('\n🛑 正在关闭...');
+let shutdownStarted = false;
+function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`\n🛑 收到 ${signal}，正在关闭...`);
+  clearInterval(heartbeatTimer);
+  for (const [, slot] of agents) {
+    if (slot.cleanupTimer) clearTimeout(slot.cleanupTimer);
+  }
   for (const [, b] of browserClients) b.ws.close(1001, 'Server shutting down');
   for (const [, slot] of agents) { if (slot.ws) slot.ws.close(1001, 'Server shutting down'); }
   wss.close();
-  server.close();
+  const forceExit = setTimeout(() => process.exit(1), 5000);
+  forceExit.unref();
+  server.close(() => {
+    process.exit(0);
+  });
   if (redirectServer) redirectServer.close();
-  process.exit(0);
-});
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
