@@ -31,7 +31,7 @@ console.warn = (...args) => origWarn(`[${ts()}]`, ...args);
 console.error = (...args) => origError(`[${ts()}]`, ...args);
 
 // ─── 配置 ───────────────────────────────────────────────────────
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, '..', 'config.json');
 let config;
 try {
   config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
@@ -101,7 +101,14 @@ if (USE_TLS) {
   server = http.createServer(app);
 }
 
-const wss = new WebSocketServer({ server });
+const MAX_WS_PAYLOAD_BYTES = Number(process.env.CW_MAX_WS_PAYLOAD_BYTES) || 1024 * 1024;
+const MAX_SESSION_ID_LENGTH = 128;
+const MAX_TITLE_LENGTH = 120;
+const MAX_INPUT_BYTES = 64 * 1024;
+const MAX_COLS = 300;
+const MAX_ROWS = 100;
+
+const wss = new WebSocketServer({ server, maxPayload: MAX_WS_PAYLOAD_BYTES });
 
 // ─── 连接状态（多 Agent 架构）──────────────────────────────────────
 // token → { ws, name, sessions: [], scrollback: Map<sessionId, string>, cleanupTimer }
@@ -186,14 +193,79 @@ function appendScrollback(token, sessionId, chunk) {
   slot.scrollback.set(sessionId, buf);
 }
 
+function isLoopbackAddress(addr) {
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(addr);
+}
+
+function getClientIp(req) {
+  const remote = req.socket.remoteAddress || 'unknown';
+  const realIp = (req.headers['x-real-ip'] || '').trim();
+  return isLoopbackAddress(remote) && realIp ? realIp : remote;
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(String(value || ''), 'utf8');
+}
+
+function validSessionId(sessionId) {
+  return typeof sessionId === 'string' &&
+    sessionId.length > 0 &&
+    sessionId.length <= MAX_SESSION_ID_LENGTH &&
+    !/[\x00-\x1F\x7F]/.test(sessionId);
+}
+
+function sanitizeBrowserMessage(data) {
+  if (!data || typeof data !== 'object') return { ok: false, message: 'Invalid message' };
+  const type = data.type;
+
+  if (type === 'ping' || type === 'terminal_list') return { ok: true, data: { type } };
+  if (type === 'chat') {
+    if (!validSessionId(data.sessionId)) return { ok: false, message: 'Invalid sessionId' };
+    if (typeof data.message !== 'string' || byteLength(data.message) > MAX_INPUT_BYTES) {
+      return { ok: false, sessionId: data.sessionId, message: 'Invalid chat message' };
+    }
+    return { ok: true, data: { type, sessionId: data.sessionId, message: data.message } };
+  }
+
+  if (!validSessionId(data.sessionId)) return { ok: false, message: 'Invalid sessionId' };
+
+  switch (type) {
+    case 'terminal_create': {
+      const title = typeof data.title === 'string' ? data.title.trim() : '';
+      return {
+        ok: true,
+        data: {
+          type,
+          sessionId: data.sessionId,
+          title: (title || '新会话').slice(0, MAX_TITLE_LENGTH),
+        },
+      };
+    }
+    case 'terminal_input':
+      if (typeof data.data !== 'string' || byteLength(data.data) > MAX_INPUT_BYTES) {
+        return { ok: false, sessionId: data.sessionId, message: 'Invalid terminal input' };
+      }
+      return { ok: true, data: { type, sessionId: data.sessionId, data: data.data } };
+    case 'terminal_resize': {
+      const cols = Math.max(2, Math.min(MAX_COLS, Number.parseInt(data.cols, 10) || 120));
+      const rows = Math.max(2, Math.min(MAX_ROWS, Number.parseInt(data.rows, 10) || 30));
+      return { ok: true, data: { type, sessionId: data.sessionId, cols, rows } };
+    }
+    case 'terminal_delete':
+      return { ok: true, data: { type, sessionId: data.sessionId, deleteFiles: data.deleteFiles === true } };
+    case 'terminal_attach':
+      return { ok: true, data: { type, sessionId: data.sessionId } };
+    default:
+      return { ok: false, sessionId: data.sessionId, message: 'Unknown message type' };
+  }
+}
+
 // ─── WebSocket 处理 ─────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
-  // 仅信任 Nginx 注入的 X-Real-IP（proxy_set_header X-Real-IP $remote_addr —— 会覆盖客户端自带值，
-  // 真实且不可伪造）。绝不能取 X-Forwarded-For 的首段：$proxy_add_x_forwarded_for 会把客户端携带的
-  // XFF 头透传过来，攻击者据此伪造任意 IP，可让基于 IP 的速率限制/封禁形同虚设。
-  // 直连（绕过 Nginx，仅可能来自 127.0.0.1）时 X-Real-IP 缺失，回退到真实 socket 地址。
-  const clientIp = (req.headers['x-real-ip'] || '').trim() || req.socket.remoteAddress || 'unknown';
+  // 只在连接来自本机反向代理时信任 X-Real-IP；直连 Node 端口时使用真实 socket 地址。
+  // 这样即使误把 Node 端口暴露到公网，客户端也不能伪造 X-Real-IP 绕过速率限制。
+  const clientIp = getClientIp(req);
   console.log(`🔗 新连接: ${clientId} from ${clientIp} (agent=${req.headers['user-agent']?.slice(0,40)||'?'})`);
 
   // 死连接检测：任何来自对端的字节（pong / ping / message）都算存活信号。
@@ -230,6 +302,12 @@ wss.on('connection', (ws, req) => {
 
     // ── 鉴权 ───────────────────────────────────────────────
     if (data.type === 'auth') {
+      if (!['browser', 'agent'].includes(data.role)) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid role' }));
+        ws.close(4001, 'Invalid role');
+        return;
+      }
+
       const blocked = rateLimiter.checkBlocked(clientIp);
       if (blocked.blocked) {
         console.warn(`🚫 拒绝认证: ${clientId} (${clientIp}): ${blocked.reason}`);
@@ -296,22 +374,29 @@ wss.on('connection', (ws, req) => {
 
     // ── 浏览器 → Agent ─────────────────────────────────────
     if (clientType === 'browser') {
-      switch (data.type) {
+      const checked = sanitizeBrowserMessage(data);
+      if (!checked.ok) {
+        ws.send(JSON.stringify({ type: 'terminal_error', sessionId: checked.sessionId, message: checked.message }));
+        return;
+      }
+      const msg = checked.data;
+
+      switch (msg.type) {
         case 'terminal_create':
         case 'terminal_input':
         case 'terminal_resize':
         case 'terminal_delete':
         case 'terminal_list':
         case 'chat': {
-          if (data.type === 'terminal_delete') {
+          if (msg.type === 'terminal_delete') {
             const slot = agents.get(boundToken);
-            if (slot) slot.scrollback.delete(data.sessionId);
+            if (slot) slot.scrollback.delete(msg.sessionId);
           }
-          const ok = sendToAgent(boundToken, data);
+          const ok = sendToAgent(boundToken, msg);
           if (!ok) {
             ws.send(JSON.stringify({
               type: 'terminal_error',
-              sessionId: data.sessionId,
+              sessionId: msg.sessionId,
               message: 'Agent 离线，操作未送达',
             }));
           }
@@ -320,12 +405,12 @@ wss.on('connection', (ws, req) => {
         case 'terminal_attach': {
           const slot = agents.get(boundToken);
           if (slot) {
-            const buf = slot.scrollback.get(data.sessionId);
+            const buf = slot.scrollback.get(msg.sessionId);
             if (buf) {
-              ws.send(JSON.stringify({ type: 'terminal_output', sessionId: data.sessionId, data: buf, replay: true }));
+              ws.send(JSON.stringify({ type: 'terminal_output', sessionId: msg.sessionId, data: buf, replay: true }));
             }
           }
-          ws.send(JSON.stringify({ type: 'terminal_attached', sessionId: data.sessionId }));
+          ws.send(JSON.stringify({ type: 'terminal_attached', sessionId: msg.sessionId }));
           break;
         }
         case 'ping':
@@ -359,26 +444,16 @@ wss.on('connection', (ws, req) => {
           const slot = agents.get(boundToken);
           if (slot) {
             const raw = Array.isArray(data.sessions) ? data.sessions : [];
-            // 多维度去重：同一 ID 或 同一 (title, cwd) 组合只保留第一个
-            // Agent 端 bug 会导致同标题/同路径的 recovered 会话以不同 ID 重复上报
             const seenIds = new Set();
-            const seenKeys = new Set();
             slot.sessions = raw.filter(s => {
               if (!s || !s.id) return false;
               if (seenIds.has(s.id)) return false;
-              // 用 title + cwd 作为业务唯一键去重
-              const key = `${s.title || ''}||${s.cwd || ''}`;
-              if (seenKeys.has(key)) {
-                console.log(`🧹 去重重复会话: ${s.title} (${s.id.slice(0,8)}…) cwd=${s.cwd}`);
-                return false;
-              }
               // 过滤掉异常状态（如 "recovered" 等 Agent 恢复功能产生的残留）
               if (!['running', 'exited', 'disconnected'].includes(s.status)) {
                 console.log(`🧹 过滤异常状态会话: ${s.title} (${s.id.slice(0,8)}…) status=${s.status}`);
                 return false;
               }
               seenIds.add(s.id);
-              seenKeys.add(key);
               return true;
             });
             broadcastToBrowsers(boundToken, { type: 'sessions', sessions: slot.sessions });
@@ -450,6 +525,11 @@ setInterval(() => {
 }, 30000);
 
 // ─── 启动 ───────────────────────────────────────────────────────
+server.on('error', (err) => {
+  console.error(`❌ Server 启动失败 (${BIND_HOST}:${PORT}): ${err.message}`);
+  process.exit(1);
+});
+
 server.listen(PORT, BIND_HOST, () => {
   const proto = USE_TLS ? 'HTTPS + WSS' : 'HTTP + WS';
   const rl = rateLimiter.stats();

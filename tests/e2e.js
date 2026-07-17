@@ -10,8 +10,7 @@
  * 它模拟前端的 attach/detach 与 attached 去重逻辑，逐项断言并打分。
  * ═══════════════════════════════════════════════════════════════
  */
-const path = require('path');
-const WebSocket = require(path.join(__dirname, '..', 'agent', 'node_modules', 'ws'));
+const WebSocket = require('./ws-client');
 
 let token = process.env.CLAUDE_WEB_TOKEN;
 try {

@@ -33,19 +33,11 @@ function setWorkspaceRoot(root) {
  * 所有会话共享同一个工作区根目录（不创建独立子目录），
  * 用户可在终端中自行 mkdir 创建文件夹。
  *
- * 去重：如果已存在相同 title + cwd 的 running 会话，复用已有会话。
+ * 同一个 sessionId 只能对应一个终端；不同 sessionId 即使标题和 cwd 相同也必须允许并存。
  * @returns {Session}
  */
 function createSession(sessionId, title, callbacks = {}) {
   const { onData, onExit } = callbacks;
-
-  // 去重：检查是否已存在相同 title + cwd 的 running 会话
-  for (const [existingId, existing] of sessions) {
-    if (existing.status === 'running' && existing.title === title && existing.cwd === WORKSPACE_ROOT) {
-      console.log(`⚠  会话已存在，复用: ${title} (${existingId.slice(0, 8)})`);
-      return existing;
-    }
-  }
 
   if (sessions.has(sessionId)) {
     destroySession(sessionId);
@@ -117,9 +109,9 @@ function getSession(sessionId) {
 /** 会话有效状态（只有这些状态会上报给服务器） */
 const VALID_STATUSES = new Set(['running', 'exited']);
 
-/** 返回可序列化的会话列表（不含 terminal 对象），过滤异常状态并去重 */
+/** 返回可序列化的会话列表（不含 terminal 对象），过滤异常状态并按 ID 去重 */
 function listSessions() {
-  const seen = new Set();
+  const seenIds = new Set();
   return [...sessions.values()]
     .filter((s) => {
       // 过滤异常状态（如 "recovered" 等残留）
@@ -127,13 +119,11 @@ function listSessions() {
         console.log(`🧹 过滤异常状态会话不上报: ${s.title} (${s.id.slice(0, 8)}) status=${s.status}`);
         return false;
       }
-      // 按 title + cwd 去重（同标题同路径只保留第一个）
-      const key = `${s.title}||${s.cwd}`;
-      if (seen.has(key)) {
-        console.log(`🧹 去重重复会话不上报: ${s.title} (${s.id.slice(0, 8)}) cwd=${s.cwd}`);
+      if (seenIds.has(s.id)) {
+        console.log(`🧹 去重重复会话 ID 不上报: ${s.title} (${s.id.slice(0, 8)})`);
         return false;
       }
-      seen.add(key);
+      seenIds.add(s.id);
       return true;
     })
     .map((s) => ({

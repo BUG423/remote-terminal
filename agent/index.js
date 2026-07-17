@@ -19,7 +19,7 @@ const sessionManager = require('./session-manager');
 const auditLog = require('./audit-log');
 
 // ─── 配置 ───────────────────────────────────────────────────────
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+const CONFIG_PATH = process.env.CW_CONFIG_PATH || path.join(__dirname, '..', 'config.json');
 let config;
 try {
   config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
@@ -59,6 +59,43 @@ const {
 const useWSS = useTLS || process.env.CW_USE_WSS === 'true';
 const SERVER_URL = `${useWSS ? 'wss' : 'ws'}://${serverHost}:${serverPort}`;
 const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
+
+const MAX_SESSION_ID_LENGTH = 128;
+const MAX_TITLE_LENGTH = 120;
+const MAX_INPUT_BYTES = 64 * 1024;
+const MAX_COLS = 300;
+const MAX_ROWS = 100;
+
+function failConfig(message) {
+  console.error(`❌ 配置错误: ${message}`);
+  process.exit(1);
+}
+
+if (!token || typeof token !== 'string' || token.length < 32) {
+  failConfig('token 必须存在且至少 32 个字符');
+}
+if (!serverHost || typeof serverHost !== 'string' || serverHost.includes('your-server')) {
+  failConfig('serverHost 必须设置为真实服务器 IP 或域名');
+}
+if (!Number.isInteger(Number(serverPort)) || Number(serverPort) <= 0 || Number(serverPort) > 65535) {
+  failConfig('serverPort 必须是 1-65535 之间的端口');
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(String(value || ''), 'utf8');
+}
+
+function validSessionId(sessionId) {
+  return typeof sessionId === 'string' &&
+    sessionId.length > 0 &&
+    sessionId.length <= MAX_SESSION_ID_LENGTH &&
+    !/[\x00-\x1F\x7F]/.test(sessionId);
+}
+
+function sanitizeTitle(title) {
+  const value = typeof title === 'string' ? title.trim() : '';
+  return (value || '新会话').slice(0, MAX_TITLE_LENGTH);
+}
 
 // ─── 状态 ───────────────────────────────────────────────────────
 let ws = null;
@@ -191,6 +228,10 @@ function handleMessage(data) {
 
     // ── 终端：输入 ────────────────────────────────────────────
     case 'terminal_input': {
+      if (!validSessionId(data.sessionId) || typeof data.data !== 'string' || byteLength(data.data) > MAX_INPUT_BYTES) {
+        send({ type: 'terminal_error', sessionId: data.sessionId, message: '无效的终端输入' });
+        break;
+      }
       const session = sessionManager.getSession(data.sessionId);
       if (session && session.status === 'running') {
         session.terminal.write(data.data);
@@ -204,13 +245,17 @@ function handleMessage(data) {
 
     // ── 终端：resize ─────────────────────────────────────────
     case 'terminal_resize': {
+      if (!validSessionId(data.sessionId)) break;
       const session = sessionManager.getSession(data.sessionId);
-      if (session) session.terminal.resize(data.cols, data.rows);
+      const cols = Math.max(2, Math.min(MAX_COLS, Number.parseInt(data.cols, 10) || 120));
+      const rows = Math.max(2, Math.min(MAX_ROWS, Number.parseInt(data.rows, 10) || 30));
+      if (session) session.terminal.resize(cols, rows);
       break;
     }
 
     // ── 终端：删除 ────────────────────────────────────────────
     case 'terminal_delete': {
+      if (!validSessionId(data.sessionId)) break;
       dropOutputBuffer(data.sessionId);
       auditLog.clearSession(data.sessionId);
       sessionManager.deleteSession(data.sessionId, !!data.deleteFiles);
@@ -239,8 +284,12 @@ function handleMessage(data) {
 }
 
 function onTerminalCreate(data) {
-  const { sessionId, title } = data;
-  if (!sessionId) return;
+  const { sessionId } = data;
+  const title = sanitizeTitle(data.title);
+  if (!validSessionId(sessionId)) {
+    send({ type: 'terminal_error', sessionId, message: '无效的 sessionId' });
+    return;
+  }
 
   // 已存在则直接回报，不重复创建
   if (sessionManager.getSession(sessionId)) {
@@ -251,7 +300,7 @@ function onTerminalCreate(data) {
   }
 
   try {
-    const session = sessionManager.createSession(sessionId, title || '新会话', {
+    const session = sessionManager.createSession(sessionId, title, {
       onData: (sid, chunk) => queueOutput(sid, chunk),
       onExit: (sid, evt) => {
         flushOutput(sid); // 先把残留输出发完

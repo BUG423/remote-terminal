@@ -9,7 +9,7 @@
  * ═══════════════════════════════════════════════════════════════
  */
 
-const WebSocket = require('../agent/node_modules/ws');
+const WebSocket = require('./ws-client');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

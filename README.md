@@ -129,6 +129,32 @@ node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
 | 变量 | 作用 | 示例 |
 |------|------|------|
 | `CW_USE_WSS=true` | Agent 用 WSS 连接（HTTPS 时需要） | `CW_USE_WSS=true` |
+| `CW_CONFIG_PATH=/path/config.json` | 指定 Server/Agent 配置文件路径（测试和多环境部署时使用） | `CW_CONFIG_PATH=/tmp/config.json` |
+| `CW_MAX_WS_PAYLOAD_BYTES=1048576` | Server WebSocket 单消息大小上限 | `1048576` |
+
+### 测试
+
+```bash
+# 安装云端 Server 依赖
+cd server && npm ci && cd ..
+
+# 跑不依赖 node-pty 的单元/协议测试
+npm test
+```
+
+Agent 依赖 `node-pty`，如果当前 Node 版本没有可用预编译包，需要系统具备编译工具：
+
+```bash
+sudo apt-get install -y build-essential python3
+cd agent && npm ci
+```
+
+完整端到端测试需要本地 Server 和 Agent 都在线：
+
+```bash
+node tests/e2e.js
+node tests/security.js
+```
 
 ---
 

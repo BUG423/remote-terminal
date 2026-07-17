@@ -16,15 +16,11 @@ const VALID_SERVER_STATUSES = ['running', 'exited', 'disconnected'];
 
 function serverFilterSessions(raw) {
   const seenIds = new Set();
-  const seenKeys = new Set();
   return raw.filter(s => {
     if (!s || !s.id) return false;
     if (seenIds.has(s.id)) return false;
-    const key = `${s.title || ''}||${s.cwd || ''}`;
-    if (seenKeys.has(key)) return false;
     if (!VALID_SERVER_STATUSES.includes(s.status)) return false;
     seenIds.add(s.id);
-    seenKeys.add(key);
     return true;
   });
 }
@@ -43,13 +39,12 @@ function browserCleanSessions(sessions) {
 const AGENT_VALID_STATUSES = new Set(['running', 'exited']);
 
 function agentListSessions(sessions) {
-  const seen = new Set();
+  const seenIds = new Set();
   return sessions
     .filter(s => {
       if (!AGENT_VALID_STATUSES.has(s.status)) return false;
-      const key = `${s.title}||${s.cwd}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (seenIds.has(s.id)) return false;
+      seenIds.add(s.id);
       return true;
     });
 }
@@ -208,30 +203,28 @@ test('服务器：接受 running + exited + disconnected，过滤 recovered', ()
     filtered.every(s => s.status !== 'recovered');
 });
 
-// ── 场景 5: 去重测试 ──────────────────────────────────────────────
-console.log('\n📋 场景 5: 去重（同 title+cwd 不同 ID）');
+// ── 场景 5: 同名同目录多会话 ─────────────────────────────────────
+console.log('\n📋 场景 5: 同 title+cwd 不同 ID 是合法多会话');
 
-test('服务器：3 个同 title+cwd 会话 → 仅保留第 1 个', () => {
+test('服务器：3 个同 title+cwd 会话 → 全部保留', () => {
   const raw = [
     { id: 'id-001', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
-    { id: 'id-002', title: 'Stock', cwd: '/ws/Stock', status: 'running' }, // dup
-    { id: 'id-003', title: 'Stock', cwd: '/ws/Stock', status: 'running' }, // dup
+    { id: 'id-002', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
+    { id: 'id-003', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
     { id: 'id-004', title: 'hq', cwd: '/ws/hq', status: 'running' },
   ];
   const filtered = serverFilterSessions(raw);
-  return filtered.length === 2 &&
-    filtered[0].id === 'id-001' &&
-    filtered[1].id === 'id-004';
+  return filtered.length === 4;
 });
 
-test('Agent 端：3 个同 title+cwd → 仅保留第 1 个', () => {
+test('Agent 端：3 个同 title+cwd → 全部保留', () => {
   const sessions = [
     { id: 'id-001', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
     { id: 'id-002', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
     { id: 'id-003', title: 'Stock', cwd: '/ws/Stock', status: 'running' },
   ];
   const filtered = agentListSessions(sessions);
-  return filtered.length === 1 && filtered[0].id === 'id-001';
+  return filtered.length === 3;
 });
 
 // ── 结果汇总 ─────────────────────────────────────────────────────

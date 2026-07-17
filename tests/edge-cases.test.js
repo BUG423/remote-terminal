@@ -75,28 +75,24 @@ test('id 为空字符串 → 被过滤', () => {
   return filtered.length === 0; // 空字符串是 falsy
 });
 
-test('大量会话（100个）去重 → 性能正常', () => {
+test('大量会话（100个）按 ID 去重 → 性能正常', () => {
   const raw = [];
-  // 创建 100 个会话，其中 50 个是重复的
+  // 创建 100 个合法会话；即使 title/cwd 相同，只要 id 不同就应保留。
   for (let i = 0; i < 50; i++) {
     raw.push({ id: `unique-${i}`, title: `Session ${i}`, cwd: `/ws/${i}`, status: 'running' });
-    raw.push({ id: `dup-${i}`, title: `Session ${i}`, cwd: `/ws/${i}`, status: 'running' }); // 重复
+    raw.push({ id: `same-title-${i}`, title: `Session ${i}`, cwd: `/ws/${i}`, status: 'running' });
   }
   const start = Date.now();
   const seenIds = new Set();
-  const seenKeys = new Set();
   const filtered = raw.filter(s => {
     if (!s || !s.id) return false;
     if (seenIds.has(s.id)) return false;
-    const key = `${s.title || ''}||${s.cwd || ''}`;
-    if (seenKeys.has(key)) return false;
     if (!VALID_SERVER_STATUSES.includes(s.status)) return false;
     seenIds.add(s.id);
-    seenKeys.add(key);
     return true;
   });
   const elapsed = Date.now() - start;
-  const valid = filtered.length === 50 && elapsed < 100;
+  const valid = filtered.length === 100 && elapsed < 100;
   console.log(`    → ${filtered.length} 个会话, 耗时 ${elapsed}ms`);
   return valid;
 });

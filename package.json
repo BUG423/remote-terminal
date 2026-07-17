@@ -1,0 +1,14 @@
+{
+  "name": "remote-terminal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web terminal relay with a browser UI, cloud server, and local agent.",
+  "scripts": {
+    "test": "node tests/session-dedup.test.js && node tests/e2e-scenarios.test.js && node tests/edge-cases.test.js && node tests/server-protocol.test.js",
+    "test:security": "node tests/security.js",
+    "test:e2e": "node tests/e2e.js"
+  },
+  "engines": {
+    "node": ">=20 <25"
+  }
+}
