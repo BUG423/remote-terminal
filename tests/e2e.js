@@ -50,15 +50,47 @@ class Client {
   }
   connect() {
     return new Promise((resolve, reject) => {
+      if (!token) {
+        reject(new Error('CLAUDE_WEB_TOKEN is required'));
+        return;
+      }
+
+      let authSettled = false;
+      let authTimeout;
+
+      const finishAuth = (fn, value) => {
+        if (authSettled) return;
+        authSettled = true;
+        clearTimeout(authTimeout);
+        fn(value);
+      };
+
+      authTimeout = setTimeout(() => {
+        finishAuth(reject, new Error('Authentication timeout'));
+        try { this.ws.close(); } catch {}
+      }, 8000);
+
       this.ws = new WebSocket(TARGET);
       this.ws.on('open', () => this.ws.send(JSON.stringify({ type: 'auth', token, role: 'browser' })));
       this.ws.on('message', (raw) => {
         const m = JSON.parse(raw.toString());
-        if (m.type === 'auth_ok') { this.agentOnline = m.agentOnline; this.sessions = m.sessions || []; resolve(m); }
-        else this._handle(m);
+        if (m.type === 'auth_ok') {
+          this.agentOnline = m.agentOnline;
+          this.sessions = m.sessions || [];
+          finishAuth(resolve, m);
+        } else {
+          if (m.type === 'error' && !authSettled) {
+            finishAuth(reject, new Error(m.message || 'Authentication rejected'));
+          }
+          this._handle(m);
+        }
         for (const w of this._waiters.slice()) if (w.pred(m)) { this._waiters.splice(this._waiters.indexOf(w), 1); w.resolve(m); }
       });
-      this.ws.on('error', reject);
+      this.ws.on('error', (err) => finishAuth(reject, err));
+      this.ws.on('close', (code, reason) => {
+        const suffix = reason?.length ? `: ${reason.toString()}` : '';
+        finishAuth(reject, new Error(`WebSocket closed before authentication (${code})${suffix}`));
+      });
     });
   }
   _handle(m) {
