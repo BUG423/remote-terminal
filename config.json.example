@@ -1,38 +1,53 @@
 {
-  "_comment": "=== Claude Web 配置文件 ===",
-  "_instructions": "复制此文件为 config.json 并填入你的信息: cp config.json.example config.json",
+  "_comment": "=== Remote Terminal 配置文件 ===",
+  "_instructions": "复制为 config.json；替换所有 change-me/example.com 示例值，不要提交 config.json",
 
   "port": 3002,
-  "_port_comment": "服务器监听端口，默认 3002",
-
   "bindHost": "127.0.0.1",
-  "_bindHost_comment": "监听地址。配合 Nginx 反向代理时设为 127.0.0.1（不对外暴露端口）；直接对外服务时设为 0.0.0.0",
+  "_server_listen_comment": "Server 只监听本机 3002，由 Nginx 在 443 提供 HTTPS/WSS",
 
   "tokens": {
-    "your-token-for-agent-1-change-me": "办公室电脑",
-    "your-token-for-agent-2-change-me": "家里笔记本"
+    "change-me-generate-a-random-token-01": "受控服务器 A"
   },
-  "_tokens_comment": "多 Agent Token 映射（推荐）。每个 Agent 使用独立 Token，浏览器输入哪个 Token 就连到哪个 Agent。生成 Token: node -e \"console.log(require('crypto').randomBytes(24).toString('base64url'))\"",
+  "_tokens_comment": "Server 的 Token 到 Agent 名称映射。Token 必须为 32-512 字符且不能是示例值",
 
-  "token": "DEPRECATED-use-tokens-instead",
-  "_token_comment": "【已废弃】单 Token 模式。仅用于兼容旧版。建议使用上面的 tokens 替代。",
+  "agentToken": "change-me-generate-a-random-token-01",
+  "_agent_token_comment": "Agent 使用的 Token。多 Agent 时，每台机器只保留自己的 Token；也可用 CLAUDE_WEB_TOKEN",
 
-  "serverHost": "your-server-ip-or-domain",
-  "_serverHost_comment": "云服务器的公网 IP 地址或域名。Agent 和浏览器都将连接到此地址。",
+  "serverUrl": "wss://terminal.example.com",
+  "_server_url_comment": "Agent 主动连接的完整地址，推荐 WSS 443，可带路径。CW_SERVER_URL 可覆盖",
 
-  "serverPort": 3000,
-  "_serverPort_comment": "云服务器上 Nginx 对外暴露的端口。Agent 和浏览器都连接这个端口，Nginx 再反向代理到内部的 port (3002)。",
-
-  "useTLS": false,
-  "_useTLS_comment": "【直连模式】是否由 Node.js 直接处理 TLS。Nginx 反向代理时设为 false，Agent 通过 CW_USE_WSS=true 环境变量启用 WSS。本地测试可设为 true + scripts/generate-cert.sh 自签名证书。",
-
-  "tlsCertPath": "/etc/letsencrypt/live/your-domain.com/fullchain.pem",
-  "tlsKeyPath": "/etc/letsencrypt/live/your-domain.com/privkey.pem",
-  "_tls_comment": "TLS 证书路径，仅在 useTLS=true 时需要。Nginx 模式下证书由 Nginx 管理（certbot --nginx），此处无需配置。",
-
-  "redirectPort": 80,
-  "_redirectPort_comment": "HTTP→HTTPS 重定向端口，仅在 useTLS=true 时生效。Nginx 模式下重定向由 Nginx 处理，此处可忽略。",
+  "proxyUrl": "",
+  "noProxy": "localhost,127.0.0.1",
+  "_proxy_comment": "可选 HTTP/HTTPS 出口代理；也支持 HTTPS_PROXY、HTTP_PROXY 和 NO_PROXY",
 
   "workspaceRoot": "~/WebClaudeWorkspaces",
-  "_workspaceRoot_comment": "【Agent 端】工作区根目录。所有会话在此目录下启动，用户可在终端中自行创建文件夹。所有会话被强制限制在此根目录内（安全边界）。支持 ~ 展开。"
+  "_workspace_root_comment": "Agent 终端的起始目录。Shell 仍可访问运行用户有权限访问的其他路径，这不是系统沙箱",
+
+  "maxSessions": 12,
+  "maxBrowsersPerToken": 8,
+  "maxTotalConnections": 200,
+  "maxWsBufferedBytes": 2097152,
+  "scrollbackBytes": 262144,
+  "offlineOutputBytes": 262144,
+  "_limits_comment": "限制每个 Agent 的 PTY 数、浏览器连接数，以及 Server/Agent 每会话输出缓存",
+
+  "auditEnabled": true,
+  "auditLogPath": "~/WebClaudeWorkspaces/.audit.log",
+  "auditMaxBytes": 10485760,
+  "_audit_comment": "审计日志默认 0600 权限并自动轮转；日志可能包含输入的敏感命令，可按风险关闭",
+
+  "enableLegacyChat": false,
+  "claudeDangerouslySkipPermissions": false,
+  "_legacy_chat_comment": "旧 claude -p 聊天协议默认关闭；即使启用也默认保留 Claude 权限确认",
+
+  "useTLS": false,
+  "tlsCertPath": "/etc/letsencrypt/live/terminal.example.com/fullchain.pem",
+  "tlsKeyPath": "/etc/letsencrypt/live/terminal.example.com/privkey.pem",
+  "redirectPort": 80,
+  "_direct_tls_comment": "仅 Node.js 直连 TLS 时使用。推荐由 Nginx 处理 TLS，因此保持 false",
+
+  "serverHost": "",
+  "serverPort": 3002,
+  "_legacy_connection_comment": "serverHost/serverPort 仅兼容旧 Agent 配置；设置 serverUrl 后忽略"
 }

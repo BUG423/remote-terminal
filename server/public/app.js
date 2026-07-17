@@ -14,7 +14,7 @@ const STATE = {
   activeId: null,
   splitMode: false,       // 分屏模式：同时显示多个终端
   reconnectAttempts: 0,
-  maxReconnect: 10,
+  reconnectEnabled: true,
 };
 
 // sessionId -> { term, fit, container, attached, observer, lastActivity }
@@ -88,7 +88,6 @@ function connect() {
 
   ws.onopen = () => {
     connecting = false;
-    STATE.reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: 'auth', token: getToken(), role: 'browser' }));
   };
   ws.onmessage = (e) => {
@@ -98,6 +97,7 @@ function connect() {
   };
   ws.onclose = () => {
     connecting = false;
+    if (STATE.ws === ws) STATE.ws = null;
     STATE.authenticated = false;
     updateAgentStatus();
     scheduleReconnect();
@@ -109,9 +109,10 @@ let reconnectScheduled = false;
 
 function scheduleReconnect() {
   if (reconnectScheduled) return;
-  if (STATE.reconnectAttempts >= STATE.maxReconnect) return;
+  if (!STATE.reconnectEnabled || !getToken()) return;
   reconnectScheduled = true;
-  const delay = Math.min(1000 * Math.pow(2, STATE.reconnectAttempts), 30000);
+  const baseDelay = Math.min(1000 * Math.pow(2, Math.min(STATE.reconnectAttempts, 5)), 30000);
+  const delay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
   STATE.reconnectAttempts++;
   setTimeout(() => {
     reconnectScheduled = false;
@@ -124,6 +125,8 @@ function handleMessage(data) {
   switch (data.type) {
     case 'auth_ok':
       STATE.authenticated = true;
+      STATE.reconnectEnabled = true;
+      STATE.reconnectAttempts = 0;
       STATE.clientId = data.clientId;
       STATE.agentOnline = data.agentOnline;
       STATE.agentName = data.agentName || '';
@@ -137,7 +140,11 @@ function handleMessage(data) {
       break;
 
     case 'error':
-      if (!STATE.authenticated) showLoginError(data.message || '认证失败');
+      if (!STATE.authenticated) {
+        STATE.reconnectEnabled = false;
+        sessionStorage.removeItem('claude-web-token');
+        showLoginError(data.message || '认证失败');
+      }
       break;
 
     case 'agent_status':
@@ -679,6 +686,8 @@ loginForm.addEventListener('submit', (e) => {
   if (!t) return;
   loginBtn.disabled = true;
   loginError.classList.add('hidden');
+  STATE.reconnectEnabled = true;
+  STATE.reconnectAttempts = 0;
   saveToken(t);
   connect();
 });
@@ -696,6 +705,18 @@ window.addEventListener('resize', () => {
     }
   } else {
     if (STATE.activeId) fitTerminal(STATE.activeId);
+  }
+});
+
+window.addEventListener('online', () => {
+  STATE.reconnectAttempts = 0;
+  if (!STATE.ws || STATE.ws.readyState > 1) connect();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && getToken() &&
+      (!STATE.ws || STATE.ws.readyState > 1)) {
+    connect();
   }
 });
 

@@ -32,6 +32,9 @@ function buildServerUrl(config, env = process.env) {
   if (!['ws:', 'wss:'].includes(url.protocol)) {
     throw new Error('serverUrl must use ws:// or wss://');
   }
+  if (/example\.com$/i.test(url.hostname)) {
+    throw new Error('serverUrl must not use an example hostname');
+  }
   if (url.username || url.password || url.hash) {
     throw new Error('serverUrl must not contain credentials or a fragment');
   }

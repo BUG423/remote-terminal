@@ -64,6 +64,21 @@ function waitForHealth(timeoutMs = 8000) {
   });
 }
 
+function httpGet(pathname) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(`http://127.0.0.1:${port}${pathname}`, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        headers: res.headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    req.on('error', reject);
+  });
+}
+
 function connect(role, authToken = token) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(target);
@@ -115,6 +130,18 @@ function nextMessage(ws, predicate, timeoutMs = 5000) {
   serverProc.stderr.on('data', (d) => process.env.DEBUG_TESTS && process.stderr.write(d));
 
   await waitForHealth();
+
+  const indexPage = await httpGet('/');
+  check('页面启用 CSP 且隐藏 Express 标识',
+    indexPage.headers['content-security-policy']?.includes("default-src 'self'") &&
+    !indexPage.headers['x-powered-by']);
+  check('页面不依赖公共 CDN',
+    indexPage.body.includes('/vendor/xterm.js') && !indexPage.body.includes('cdn.jsdelivr.net'));
+  const xtermAsset = await httpGet('/vendor/xterm.js');
+  const fitAsset = await httpGet('/vendor/addon-fit.js');
+  check('xterm 与 FitAddon 由本机 Server 提供',
+    xtermAsset.status === 200 && xtermAsset.body.includes('Terminal') &&
+    fitAsset.status === 200 && fitAsset.body.includes('FitAddon'));
 
   const invalidRole = await connect('__bad_role__');
   check('无效 role 被拒绝', invalidRole.msg.type === 'error' && invalidRole.msg.message === 'Invalid role');

@@ -1,197 +1,199 @@
-# 🌐 Web-Claude
+# Remote Terminal
 
-> 🖥️ 在任何设备的浏览器里，远程操作你电脑的终端。手机、平板、笔记本都可以——打开网页，就像坐在电脑前。
+通过浏览器访问远端机器上的真实交互式终端。浏览器和 Agent 都主动连接云端中继 Server，Agent 不需要开放 SSH、RDP 或其他入站端口。
 
-![截图](docs/images/screenshot.png)
+![界面截图](docs/images/screenshot.png)
 
----
+## 适用范围
 
-## ✨ 功能特性
+本项目适合个人或内部受控环境中的远程终端访问：
 
-- 🖥️ **真正的交互式终端** — 基于 [xterm.js](https://xtermjs.org/) + [node-pty](https://github.com/microsoft/node-pty)，支持完整 shell 体验：颜色、`vim`、`top`、Tab 补全、Ctrl-C、历史命令
-- 🗂️ **多会话管理** — 同时开多个终端，各自独立工作目录，来回切换互不干扰
-- 📂 **会话绑定工作目录** — 每个会话自动创建独立的文件夹，命令在各自目录下执行
-- 🔁 **断线重连 + 历史回放** — 切换会话或刷新页面后，之前的输出自动恢复，不会丢失
-- 🔒 **Token 鉴权** — 一个 Token 绑定一台设备，浏览器输入对应 Token 就连到对应设备
-- 📱 **全平台通用** — 只要有个浏览器就能用，手机/平板/笔记本无需装 App
-- 🤖 **支持 Claude Code** — 在网页终端里直接输入 `claude`，进入交互式 AI 编程
-- ⚡ **实时输出** — 终端内容实时回传浏览器，几乎感觉不到延迟
+- 基于 `xterm.js` 和 `node-pty` 的交互式 Shell
+- 多会话、切换、分屏、历史回放和刷新恢复
+- Agent 断线重连；中继重启期间 PTY 保持运行，受限大小内的离线输出会在重连后补回
+- 多 Token 路由，每个 Token 对应一台 Agent
+- WSS、HTTP/HTTPS 出口代理和 `NO_PROXY`
+- 会话数、浏览器连接数、消息大小和回放缓存上限
+- 命令输入审计、私有文件权限和日志轮转
 
----
+它不是 SSH 的等价安全实现，也不是多租户堡垒机。持有有效 Token 的用户可以操作 Agent 运行账户权限范围内的完整 Shell。
 
-## 🏗️ 架构
+## 架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  📱 手机/平板/笔记本          ☁️ 云服务器               │
-│  ┌─────────────┐            ┌──────────────┐           │
-│  │  浏览器      │──WSS────→ │  Nginx :3000 │           │
-│  │  xterm.js   │            │  (HTTPS)     │           │
-│  └─────────────┘            │      ↓       │           │
-│                             │  Server:3002 │           │
-│                             │  (中继转发)   │           │
-│                             └──────┬───────┘           │
-│                                    │                   │
-│  💻 你的电脑                        │                   │
-│  ┌─────────────┐                   │                   │
-│  │  Agent      │←────WS───────────┘                   │
-│  │  node-pty   │                                       │
-│  │  bash/zsh   │  ← 命令在这里真正执行！                │
-│  └─────────────┘                                       │
-└─────────────────────────────────────────────────────────┘
+```text
+浏览器 ── HTTPS/WSS 443 ──┐
+                          ├── Nginx ── WS ── Server 127.0.0.1:3002
+Agent ─── WSS 443 ────────┘                         │
+                                                   │ Token 路由
+Agent 上的 node-pty / bash / zsh  <────────────────┘
 ```
 
-**三个角色，各司其职：**
+Server 只负责页面、鉴权、路由和有限回放缓存。所有命令都在 Agent 所在机器执行，Agent 不监听公网端口。
 
-| 组件 | 跑在哪 | 干什么 | 不干什么 |
-|------|--------|--------|----------|
-| **🌐 浏览器** | 任意设备 | 展示终端 UI，采集键盘输入 | 不执行命令 |
-| **☁️ Server** | 云服务器 | 托管页面、Token 鉴权、中继转发消息 | 不执行命令 |
-| **💻 Agent** | 你想控制的电脑 | 开 shell、执行命令、回传输出 | 不对外暴露端口 |
+对于禁止 SSH 22、向日葵或 ToDesk 的受限服务器，只要它仍被授权主动访问中继 Server 的 WSS 地址（通常是 TCP 443），就可以运行 Agent。若出口必须经过企业代理，可设置 `proxyUrl`、`HTTPS_PROXY` 或 `HTTP_PROXY`。
 
-> ⚠️ **命令只在 Agent 所在机器上执行**。Server 只是中转站。
+## 环境要求
 
----
+- Node.js 20、22 或 24
+- Agent 所在 Linux 机器需要可用 Shell
+- `node-pty` 没有对应预编译包时，需要 `python3`、`make` 和 C/C++ 编译工具
+- 生产入口推荐使用 Nginx 和有效 TLS 证书
 
-## 🚀 快速开始
+## 配置
 
-### 第一步：云服务器部署 Server
+从示例创建独立配置，不要把真实 Token 提交到 Git：
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/BUG423/Web-Claude.git
-cd Web-Claude
-
-# 2. 创建配置
 cp config.json.example config.json
-# 编辑 config.json：生成 Token、改成你的服务器 IP
-
-# 3. 部署到服务器（前提：已配 SSH 免密登录）
-SERVER_HOST=你的服务器IP SERVER_SSH_PORT=822 bash deploy.sh
-
-# 4. 如果有域名，配置 HTTPS
-ssh root "certbot --nginx -d 你的域名"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-### 第二步：本地电脑启动 Agent
+推荐分别给 Server 和每台 Agent 保存最小配置。
 
-```bash
-cd Web-Claude
-cp config.json.example config.json   # 填好服务器地址和 Token
-cd agent && npm install
+Server 配置：
 
-# 启动（HTTPS 时需要 CW_USE_WSS=true）
-CW_USE_WSS=true node index.js
-# 或后台运行
-CW_USE_WSS=true pm2 start index.js --name claude-web-agent && pm2 save
-```
-
-### 第三步：浏览器打开
-
-```
-https://你的域名:3000          （推荐，有 HTTPS）
-http://服务器IP:3000           （仅测试用）
-```
-
-输入你的 Token → 点左上角 **＋** 新建会话 → 开始使用 🎉
-
----
-
-## ⚙️ 配置说明
-
-```jsonc
+```json
 {
-  // ── Server 端 ──
-  "port": 3002,                    // Server 内部监听端口
-  "bindHost": "127.0.0.1",        // 仅本机（Nginx 在前）
-  "tokens": {                     // 多设备 Token 映射
-    "token-设备A": "办公室台式机",
-    "token-设备B": "家里笔记本",
-    "token-设备C": "备用设备"
+  "port": 3002,
+  "bindHost": "127.0.0.1",
+  "tokens": {
+    "替换为至少32字符的随机Token": "生产服务器 A"
   },
-
-  // ── Agent 端 ──
-  "serverHost": "你的服务器IP或域名",  // Agent 连哪里
-  "serverPort": 3000,                 // 对外端口（Nginx 端口）
-  "useTLS": false,                    // Nginx 管 TLS，这里关掉
-  "workspaceRoot": "~/WebClaudeWorkspaces"  // 会话的工作目录根路径
+  "maxSessions": 12,
+  "maxBrowsersPerToken": 8,
+  "scrollbackBytes": 262144
 }
 ```
 
-生成强随机 Token：
+Agent 配置：
 
-```bash
-node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+```json
+{
+  "agentToken": "与Server中对应条目完全一致的Token",
+  "serverUrl": "wss://terminal.example.cn",
+  "workspaceRoot": "/srv/remote-terminal-workspace",
+  "maxSessions": 12,
+  "offlineOutputBytes": 262144,
+  "auditEnabled": true,
+  "auditLogPath": "/var/log/remote-terminal/audit.log",
+  "auditMaxBytes": 10485760,
+  "enableLegacyChat": false
+}
 ```
 
-### 环境变量
+`workspaceRoot` 只是终端启动目录，不是操作系统沙箱。终端仍能访问 Agent 运行账户有权限访问的其他路径。
 
-| 变量 | 作用 | 示例 |
-|------|------|------|
-| `CW_USE_WSS=true` | Agent 用 WSS 连接（HTTPS 时需要） | `CW_USE_WSS=true` |
-| `CW_CONFIG_PATH=/path/config.json` | 指定 Server/Agent 配置文件路径（测试和多环境部署时使用） | `CW_CONFIG_PATH=/tmp/config.json` |
-| `CW_MAX_WS_PAYLOAD_BYTES=1048576` | Server WebSocket 单消息大小上限 | `1048576` |
-
-### 测试
+## 部署 Server
 
 ```bash
-# 安装云端 Server 依赖
-cd server && npm ci && cd ..
+git clone https://github.com/BUG423/remote-terminal.git /opt/remote-terminal
+cd /opt/remote-terminal/server
+npm ci --omit=dev --no-audit --no-fund
 
-# 跑不依赖 node-pty 的单元/协议测试
-npm test
+CW_CONFIG_PATH=/etc/remote-terminal/server.json \
+  pm2 start index.js --name remote-terminal-server --cwd /opt/remote-terminal/server
+pm2 save
 ```
 
-Agent 依赖 `node-pty`，如果当前 Node 版本没有可用预编译包，需要系统具备编译工具：
+Node Server 应保持 `127.0.0.1:3002`，只让 Nginx 对外暴露 443。仓库中的 [Nginx 配置](nginx/web-claude.conf)是模板，替换域名和证书路径后再启用：
 
 ```bash
-sudo apt-get install -y build-essential python3
-cd agent && npm ci
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
-完整端到端测试需要本地 Server 和 Agent 都在线：
+前端的 xterm 资源由 Server 本地提供，不依赖公共 CDN。
+
+以后从 GitHub 安全更新现有服务器检出目录：
 
 ```bash
-node tests/e2e.js
-node tests/security.js
+SERVER_HOST=服务器地址 \
+SERVER_SSH_PORT=822 \
+REMOTE_DIR=/opt/remote-terminal \
+bash deploy.sh
 ```
 
----
+`deploy.sh` 只接受干净的现有 Git 工作区，只做 `origin/main` 快进更新、`npm ci`、PM2 重载和健康检查。它不会上传配置、安装系统包、修改防火墙或覆盖 Nginx。
 
-## 🔒 安全贴士
+## 运行 Agent
 
-- ✅ `config.json` 已加入 `.gitignore`，Token 不会上传 GitHub
-- ✅ 启用 HTTPS + Nginx 反向代理，不直接暴露 Node.js 端口
-- ✅ 会话工作目录被限制在 `workspaceRoot` 内，无法越界
-- ⚠️ 网页终端等同于暴露 shell，请使用强随机 Token
-- ⚠️ 建议用低权限用户运行 Agent
+```bash
+cd /opt/remote-terminal/agent
+npm ci --no-audit --no-fund
 
----
+CW_CONFIG_PATH=/etc/remote-terminal/agent.json \
+  pm2 start index.js --name remote-terminal-agent --cwd /opt/remote-terminal/agent
+pm2 save
+```
 
-## ❓ 常见问题
+受限网络通过显式代理连接：
 
-**Q: 前端显示 Agent 离线？**
+```json
+{
+  "serverUrl": "wss://terminal.example.cn",
+  "proxyUrl": "http://proxy.internal:8080",
+  "noProxy": "localhost,127.0.0.1,.internal.example.cn"
+}
+```
 
-检查：Agent 是否在运行、Token 两端是否一致、`serverHost` 是否正确、服务器安全组是否放行 3000 端口。
+也可以使用标准环境变量：
 
-**Q: 同时开两个 Agent 会怎样？**
+```bash
+HTTPS_PROXY=http://proxy.internal:8080 \
+NO_PROXY=localhost,127.0.0.1 \
+CW_CONFIG_PATH=/etc/remote-terminal/agent.json \
+node index.js
+```
 
-后连的踢掉先连的。一个 Server 同一时间只服务一个 Agent，避免会话混乱。
+TLS 证书默认严格校验。私有 CA 可通过 Agent 配置中的 `tlsCaPath` 指定，不应关闭证书校验。
 
-**Q: 怎么确认 Agent 在控制哪台机器？**
+## 环境变量
 
-看 Agent 日志，或 `curl https://服务器:3000/health`，`agentsOnline` 显示当前连接的 Agent 数量。
+| 变量 | 作用 |
+|---|---|
+| `CW_CONFIG_PATH` | 指定 Server 或 Agent 配置文件 |
+| `CLAUDE_WEB_TOKEN` | 覆盖 Agent Token，或为 Server 增加旧单 Token |
+| `CW_SERVER_URL` | 覆盖 Agent 的完整 `ws://` / `wss://` 地址 |
+| `HTTPS_PROXY` / `HTTP_PROXY` | Agent 出口代理 |
+| `NO_PROXY` | 绕过代理的主机、后缀或端口列表 |
+| `CW_MAX_SESSIONS` | 每个 Agent 的最大会话数 |
+| `CW_MAX_BROWSERS_PER_TOKEN` | 每 Token 最大浏览器连接数 |
+| `CW_OFFLINE_OUTPUT_BYTES` | Agent 每会话离线输出缓冲上限 |
+| `CW_SCROLLBACK_BYTES` | Server 每会话历史回放上限 |
+| `CW_AUDIT_LOG` | 审计日志路径 |
+| `CW_AUDIT_ENABLED=false` | 关闭命令输入审计 |
 
-**Q: 删除会话会删文件吗？**
+## 服务器测试
 
-默认只关闭终端、保留目录。勾选"同时删除文件"才会清理目录，且仅限 `workspaceRoot` 以内。
+测试脚本会临时启动真实 Server、真实 Agent 和真实 PTY，并在完成后清理进程及端口：
 
-**Q: node-pty 安装失败？**
+```bash
+cd /opt/remote-terminal
+cd server && npm ci --no-audit --no-fund
+cd ../agent && npm ci --no-audit --no-fund
+cd ..
+bash scripts/run-server-tests.sh
+```
 
-缺少编译工具。`sudo apt install -y build-essential python3` 后重试。
+覆盖范围包括：
 
----
+- 会话状态、重复 ID、并发切换和边界条件
+- Token 鉴权、隔离、重复鉴权、暴力尝试和认证超时
+- 消息大小、会话上限、浏览器连接上限和恶意 Agent 数据
+- 真实终端创建、输入、回放、删除和长任务
+- Server 实际停止并重启后的 Agent 重连、PTY 存活和离线输出补回
+- 审计日志权限与轮转、测试进程和监听端口清理
 
-## 📄 许可证
+## 安全要求
 
-MIT License — 详见 [LICENSE](LICENSE)
+- 必须使用有效 HTTPS/WSS，不要通过公网明文 `ws://` 使用。
+- Agent 应使用专用低权限系统账户；不要以 root 运行，除非明确需要完整 root 终端。
+- Token 至少 32 个随机字符，并按设备独立分配、定期轮换。
+- `config.json`、代理凭据和审计日志都应限制为仅运行账户可读。
+- 审计日志会记录终端输入，可能包含密钥、密码或其他敏感命令参数。
+- 高风险生产环境应进一步使用容器、systemd 沙箱、主机防火墙、设备证书或 mTLS。
+- 当前 Server 是单节点内存状态，不提供集群、高可用或跨节点会话迁移。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

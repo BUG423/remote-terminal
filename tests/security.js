@@ -184,22 +184,24 @@ function quickConnect(token) {
 
   // D1: 发送非 JSON 数据
   let invalidJsonRejected = false;
+  let malformedClosed = false;
   try {
     const ws = new WebSocket(TARGET);
     await new Promise((resolve) => {
       ws.on('open', () => {
-        ws.send(testToken); // raw token, not JSON
+        ws.send(testToken);
         ws.send('not-valid-json{{{');
+        ws.send('third-invalid-json');
       });
       ws.on('message', (raw) => {
         const m = JSON.parse(raw.toString());
         if (m.type === 'error' && m.message === 'Invalid JSON') invalidJsonRejected = true;
-        if (m.type === 'auth_ok') { ws.close(); resolve(); }
-        if (m.type === 'error' && m.message !== 'Invalid JSON') { ws.close(); resolve(); }
       });
+      ws.on('close', () => { malformedClosed = true; resolve(); });
+      setTimeout(resolve, 3000);
     });
   } catch {}
-  check('input', 'D1 非 JSON 数据被优雅拒绝', invalidJsonRejected);
+  check('input', 'D1 非 JSON 数据被拒绝，连续异常后断开', invalidJsonRejected && malformedClosed);
 
   // D2: 超长 session title
   let longTitleHandled = false;

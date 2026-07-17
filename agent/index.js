@@ -86,6 +86,9 @@ try {
 }
 
 const ROOT = sessionManager.setWorkspaceRoot(workspaceRoot);
+if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  console.warn('⚠  Agent 正以 root 运行；浏览器终端将拥有 root 权限。生产环境应使用专用低权限账户或容器。');
+}
 auditLog.configure({
   path: process.env.CW_AUDIT_LOG || config.auditLogPath || path.join(ROOT, '.audit.log'),
   maxBytes: Number(process.env.CW_AUDIT_MAX_BYTES || config.auditMaxBytes) || 10 * 1024 * 1024,
@@ -105,6 +108,8 @@ const OFFLINE_OUTPUT_BYTES = positiveInt(
   4 * 1024 * 1024
 );
 const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
+const LEGACY_CHAT_SKIP_PERMISSIONS = config.claudeDangerouslySkipPermissions === true;
+const MAX_CHAT_QUEUE = 20;
 const offlineOutput = new OutputBacklog(OFFLINE_OUTPUT_BYTES);
 
 function byteLength(value) {
@@ -131,6 +136,12 @@ let authenticated = false;
 let shuttingDown = false;
 let lastPongAt = 0;        // 最近一次收到服务器 pong 的时间戳
 const MAX_RECONNECT_DELAY = 30000;
+const MAX_WS_BUFFERED_BYTES = positiveInt(
+  process.env.CW_MAX_WS_BUFFERED_BYTES || config.maxWsBufferedBytes,
+  2 * 1024 * 1024,
+  64 * 1024,
+  32 * 1024 * 1024
+);
 const HEARTBEAT_MS = Number(process.env.CW_HEARTBEAT_MS) || 25000;       // 每 25s 发一次心跳
 const PONG_TIMEOUT_MS = Number(process.env.CW_PONG_TIMEOUT_MS) || 70000; // 超过 70s 没收到任何 pong → 判定连接已死
 
@@ -209,6 +220,11 @@ function scheduleReconnect() {
 
 function send(data) {
   if (authenticated && ws && ws.readyState === WebSocket.OPEN) {
+    if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+      console.warn(`⚠  WebSocket 发送积压超过 ${MAX_WS_BUFFERED_BYTES} 字节，主动重连`);
+      try { ws.terminate(); } catch { /* ignore */ }
+      return false;
+    }
     try {
       ws.send(JSON.stringify(data));
       return true;
@@ -420,7 +436,15 @@ function handleChatMessage(data) {
   }
 
   if (chatProcesses.has(sessionId) && chatProcesses.get(sessionId).proc) {
+    if (chatProcesses.get(sessionId).queue.length >= MAX_CHAT_QUEUE) {
+      send({ type: 'status', sessionId, status: 'error', message: 'Chat queue limit reached' });
+      return;
+    }
     chatProcesses.get(sessionId).queue.push({ message });
+    return;
+  }
+  if (!chatProcesses.has(sessionId) && chatProcesses.size >= MAX_SESSIONS) {
+    send({ type: 'status', sessionId, status: 'error', message: 'Chat session limit reached' });
     return;
   }
   runClaudeProcess(sessionId, message);
@@ -433,7 +457,8 @@ function runClaudeProcess(sessionId, message) {
   const session = chatProcesses.get(sessionId);
   send({ type: 'status', sessionId, status: 'thinking' });
 
-  const args = ['-p', '--verbose', '--output-format', 'stream-json', '--dangerously-skip-permissions'];
+  const args = ['-p', '--verbose', '--output-format', 'stream-json'];
+  if (LEGACY_CHAT_SKIP_PERMISSIONS) args.push('--dangerously-skip-permissions');
 
   let prompt = message;
   if (session.history.length > 0) {
@@ -446,7 +471,11 @@ function runClaudeProcess(sessionId, message) {
     prompt = parts.join('\n');
   }
 
-  const proc = spawn('claude', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env } });
+  const proc = spawn('claude', args, {
+    cwd: ROOT,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env },
+  });
   session.proc = proc;
 
   let buffer = '';

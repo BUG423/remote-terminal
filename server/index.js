@@ -96,6 +96,18 @@ const MAX_BROWSERS_PER_TOKEN = positiveInt(
   1,
   100
 );
+const MAX_TOTAL_CONNECTIONS = positiveInt(
+  process.env.CW_MAX_TOTAL_CONNECTIONS || config.maxTotalConnections,
+  200,
+  10,
+  5000
+);
+const MAX_WS_BUFFERED_BYTES = positiveInt(
+  process.env.CW_MAX_WS_BUFFERED_BYTES || config.maxWsBufferedBytes,
+  2 * 1024 * 1024,
+  64 * 1024,
+  32 * 1024 * 1024
+);
 const ENABLE_LEGACY_CHAT = config.enableLegacyChat === true;
 
 // ─── Express ────────────────────────────────────────────────────
@@ -106,11 +118,32 @@ app.use((_req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; '));
   res.setHeader('Cache-Control', 'no-store');
   next();
 });
+app.get('/vendor/xterm.js', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.js'));
+});
+app.get('/vendor/xterm.css', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css'));
+});
+app.get('/vendor/addon-fit.js', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', '@xterm', 'addon-fit', 'lib', 'addon-fit.js'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
+  if (config.healthDetails !== true) return res.json({ status: 'ok' });
   let agentCount = 0;
   for (const [, a] of agents) { if (a.ws && a.ws.readyState === 1) agentCount++; }
   res.json({ status: 'ok', tokenMode, tokenCount, agentCount, agentsOnline: agentCount });
@@ -209,6 +242,11 @@ function broadcastToBrowsers(token, data) {
 
 function safeSend(ws, payload) {
   if (!ws || ws.readyState !== 1) return false;
+  if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+    console.warn(`⚠  WebSocket 发送积压超过 ${MAX_WS_BUFFERED_BYTES} 字节，关闭慢连接`);
+    try { ws.close(1013, 'Client is too slow'); } catch { /* ignore */ }
+    return false;
+  }
   try {
     ws.send(payload);
     return true;
@@ -338,6 +376,11 @@ function sanitizeSessionList(value) {
 // ─── WebSocket 处理 ─────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const clientId = generateSessionId();
+  if (wss.clients.size > MAX_TOTAL_CONNECTIONS) {
+    safeSend(ws, JSON.stringify({ type: 'error', message: 'Server connection limit reached' }));
+    ws.close(1013, 'Server connection limit reached');
+    return;
+  }
   // 只在连接来自本机反向代理时信任 X-Real-IP；直连 Node 端口时使用真实 socket 地址。
   // 这样即使误把 Node 端口暴露到公网，客户端也不能伪造 X-Real-IP 绕过速率限制。
   const clientIp = getClientIp(req);
@@ -357,6 +400,10 @@ wss.on('connection', (ws, req) => {
   let authenticated = false;
   let clientType = null;   // 'browser' | 'agent'
   let boundToken = null;   // 鉴权通过后绑定的 Token
+  let malformedMessages = 0;
+  let rateWindowStarted = Date.now();
+  let rateMessageCount = 0;
+  let rateMessageBytes = 0;
 
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
@@ -367,11 +414,28 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     ws.isAlive = true;
+    const now = Date.now();
+    if (now - rateWindowStarted >= 1000) {
+      rateWindowStarted = now;
+      rateMessageCount = 0;
+      rateMessageBytes = 0;
+    }
+    rateMessageCount++;
+    rateMessageBytes += raw.length;
+    const messageLimit = clientType === 'agent' ? 4000 : 1000;
+    const byteLimit = clientType === 'agent' ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
+    if (rateMessageCount > messageLimit || rateMessageBytes > byteLimit) {
+      safeSend(ws, JSON.stringify({ type: 'error', message: 'Message rate limit exceeded' }));
+      ws.close(1008, 'Message rate limit exceeded');
+      return;
+    }
     let data;
     try {
       data = JSON.parse(raw.toString());
     } catch {
+      malformedMessages++;
       safeSend(ws, JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+      if (malformedMessages >= 3) ws.close(1008, 'Too many malformed messages');
       return;
     }
 

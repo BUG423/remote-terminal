@@ -42,8 +42,8 @@ echo "✅ config.json 存在"
 
 # ── 4. 安装依赖 ─────────────────────────────────────────────────
 echo ""
-echo "📦 安装依赖..."
-cd agent && npm install --quiet 2>&1 | tail -1
+echo "📦 安装锁定依赖..."
+cd agent && npm ci --no-audit --no-fund
 
 # ── 5. 启动 Agent ───────────────────────────────────────────────
 echo ""
@@ -55,7 +55,8 @@ echo ""
 if command -v pm2 &> /dev/null; then
     echo "使用 PM2 守护进程模式..."
     pm2 delete claude-web-agent 2>/dev/null || true
-    pm2 start index.js --name claude-web-agent
+    pm2 delete remote-terminal-agent 2>/dev/null || true
+    pm2 start index.js --name remote-terminal-agent --cwd "$SCRIPT_DIR/agent"
     pm2 save
     echo ""
     echo "✅ Agent 已启动（PM2 守护）"

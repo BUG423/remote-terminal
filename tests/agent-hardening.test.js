@@ -29,8 +29,8 @@ console.log('║   Agent 连接与持久性加固测试             ║');
 console.log('╚══════════════════════════════════════════╝');
 
 test('serverUrl 支持 WSS、端口和路径', () => {
-  const url = buildServerUrl({ serverUrl: 'wss://relay.example.com:443/terminal' }, {});
-  assert.equal(url.toString(), 'wss://relay.example.com/terminal');
+  const url = buildServerUrl({ serverUrl: 'wss://relay.test:443/terminal' }, {});
+  assert.equal(url.toString(), 'wss://relay.test/terminal');
 });
 
 test('旧 serverHost 配置仍可兼容', () => {

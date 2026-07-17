@@ -26,7 +26,9 @@ let enabled = process.env.CW_AUDIT_ENABLED !== 'false';
 const buffers = new Map();
 
 function configure(options = {}) {
-  if (options.path) auditLogPath = path.resolve(options.path);
+  if (options.path) {
+    auditLogPath = path.resolve(String(options.path).replace(/^~(?=$|[\\/])/, os.homedir()));
+  }
   if (Number.isInteger(options.maxBytes) && options.maxBytes >= 1024) maxLogBytes = options.maxBytes;
   if (Number.isInteger(options.maxBackups) && options.maxBackups >= 1 && options.maxBackups <= 20) {
     maxBackups = options.maxBackups;
