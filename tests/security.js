@@ -15,12 +15,14 @@ const path = require('path');
 const os = require('os');
 
 // ─── 配置 ────────────────────────────────────────────────────────
-let testToken;
+let testToken = process.env.CLAUDE_WEB_TOKEN;
 try {
-  const cfg = require('../config.json');
-  testToken = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
+  if (!testToken) {
+    const cfg = require('../config.json');
+    testToken = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
+  }
 } catch {
-  console.error('❌ 无法读取 config.json');
+  console.error('❌ 未设置 CLAUDE_WEB_TOKEN，且无法读取 config.json');
   process.exit(1);
 }
 
