@@ -101,6 +101,8 @@ CW_CONFIG_PATH=/etc/remote-terminal/server.json \
 pm2 save
 ```
 
+资源受限或安全要求较高的 Linux 服务器，可使用 `deploy/systemd/` 中的两个单元，让 Server 和 Agent 分别以独立低权限账户运行，并施加提权、文件系统、任务数和内存限制。
+
 Node Server 应保持 `127.0.0.1:3002`，只让 Nginx 对外暴露 443。仓库中的 [Nginx 配置](nginx/web-claude.conf)是模板，替换域名和证书路径后再启用：
 
 ```bash

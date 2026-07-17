@@ -1,0 +1,46 @@
+[Unit]
+Description=Remote Terminal restricted Agent
+Wants=network-online.target remote-terminal-server.service
+After=network-online.target remote-terminal-server.service
+
+[Service]
+Type=simple
+User=remote-terminal-agent
+Group=remote-terminal-agent
+WorkingDirectory=/var/lib/remote-terminal-agent/workspace
+Environment=HOME=/var/lib/remote-terminal-agent
+Environment=SHELL=/bin/bash
+Environment=NODE_ENV=production
+Environment=CW_CONFIG_PATH=/etc/remote-terminal/agent.json
+ExecStart=/usr/bin/node /opt/remote-terminal/agent/index.js
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+LockPersonality=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/remote-terminal-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+LimitNOFILE=8192
+TasksMax=128
+MemoryHigh=384M
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -52,6 +52,18 @@ test('浏览器入口只引用 Server 本地依赖', () => {
   assert(!/https?:\/\//.test(html));
 });
 
+test('systemd 单元使用独立低权限账户和资源上限', () => {
+  const serverUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-server.service'), 'utf8');
+  const agentUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-agent.service'), 'utf8');
+  assert(serverUnit.includes('User=remote-terminal-server'));
+  assert(agentUnit.includes('User=remote-terminal-agent'));
+  assert(serverUnit.includes('NoNewPrivileges=true'));
+  assert(agentUnit.includes('NoNewPrivileges=true'));
+  assert(serverUnit.includes('MemoryMax='));
+  assert(agentUnit.includes('MemoryMax='));
+  assert(agentUnit.includes('ReadWritePaths=/var/lib/remote-terminal-agent'));
+});
+
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} 项目文件检查通过`);
 if (passed !== results.length) process.exit(1);

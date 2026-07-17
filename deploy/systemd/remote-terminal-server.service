@@ -1,0 +1,43 @@
+[Unit]
+Description=Remote Terminal relay server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=remote-terminal-server
+Group=remote-terminal-server
+WorkingDirectory=/opt/remote-terminal/server
+Environment=NODE_ENV=production
+Environment=CW_CONFIG_PATH=/etc/remote-terminal/server.json
+ExecStart=/usr/bin/node /opt/remote-terminal/server/index.js
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+LockPersonality=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+LimitNOFILE=8192
+TasksMax=64
+MemoryHigh=128M
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target
