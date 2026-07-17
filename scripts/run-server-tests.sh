@@ -46,7 +46,7 @@ echo "== npm test =="
 npm test
 
 echo "== start real server + agent =="
-CW_CONFIG_PATH="${CONFIG_PATH}" node server/index.js > /tmp/remote-terminal-server.log 2>&1 &
+CW_CONFIG_PATH="${CONFIG_PATH}" node server/index.js > "${TEST_ROOT}/server.log" 2>&1 &
 SERVER_PID="$!"
 
 for _ in $(seq 1 50); do
@@ -57,7 +57,7 @@ for _ in $(seq 1 50); do
 done
 curl -fsS "http://127.0.0.1:${PORT}/health"
 
-CW_CONFIG_PATH="${CONFIG_PATH}" node agent/index.js > /tmp/remote-terminal-agent.log 2>&1 &
+CW_CONFIG_PATH="${CONFIG_PATH}" node agent/index.js > "${TEST_ROOT}/agent.log" 2>&1 &
 AGENT_PID="$!"
 sleep 3
 
