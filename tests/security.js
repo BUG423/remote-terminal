@@ -24,7 +24,7 @@ try {
   process.exit(1);
 }
 
-const TARGET = 'ws://127.0.0.1:3002';
+const TARGET = process.env.TARGET || 'ws://127.0.0.1:3002';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── 工具 ────────────────────────────────────────────────────────

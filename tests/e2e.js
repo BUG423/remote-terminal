@@ -10,17 +10,24 @@
  * 它模拟前端的 attach/detach 与 attached 去重逻辑，逐项断言并打分。
  * ═══════════════════════════════════════════════════════════════
  */
+const os = require('os');
+const path = require('path');
 const WebSocket = require('./ws-client');
 
 let token = process.env.CLAUDE_WEB_TOKEN;
+let expectedWorkspaceRoot = process.env.WORKSPACE_ROOT;
 try {
+  const cfg = require('../config.json');
   if (!token) {
-    const cfg = require('../config.json');
     // 优先从多 Token 配置取第一个，兼容旧单 token
     token = (cfg.tokens && Object.keys(cfg.tokens)[0]) || cfg.token;
   }
+  if (!expectedWorkspaceRoot && cfg.workspaceRoot) expectedWorkspaceRoot = cfg.workspaceRoot;
 } catch {}
 const TARGET = process.env.TARGET || 'ws://127.0.0.1:3002';
+if (expectedWorkspaceRoot) {
+  expectedWorkspaceRoot = path.resolve(expectedWorkspaceRoot.replace(/^~(?=$|\/)/, os.homedir()));
+}
 
 const uuid = () => require('crypto').randomUUID();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -122,7 +129,10 @@ function check(name, cond, detail = '') {
   await c.type(A, 'echo hello'); await c.waitIdle(A);
   const ta = c.terms.get(A);
   check('3. 创建会话成功且列表含该会话', c.sessions.some((s) => s.id === A));
-  check('4. pwd 输出包含 WebClaudeWorkspaces 工作区根目录', /WebClaudeWorkspaces/.test(ta.buf), 'workspaceRoot 起始目录');
+  const expectedPwd = expectedWorkspaceRoot
+    ? ta.buf.includes(expectedWorkspaceRoot)
+    : /WebClaudeWorkspaces/.test(ta.buf);
+  check('4. pwd 输出包含配置的 workspaceRoot', expectedPwd, expectedWorkspaceRoot || 'WebClaudeWorkspaces');
   check('5. echo hello 输出含 hello', /hello/.test(ta.buf));
   check('6. 双倍回显检查: "hello" 计数=2 (命令行回显1+输出1)', ta.count('hello') === 2, `实际=${ta.count('hello')}`);
 
@@ -156,7 +166,7 @@ function check(name, cond, detail = '') {
   const c2 = new Client(); await c2.connect();
   check('11. 刷新后会话列表恢复 (A、B 仍在)', c2.sessions.some((s) => s.id === A) && c2.sessions.some((s) => s.id === B));
   await c2.attach(A); await c2.waitIdle(A, 500, 3000);
-  check('12. 刷新后重新 attach A，历史输出回放成功', /e2e-A/.test(c2.terms.get(A).buf));
+  check('12. 刷新后重新 attach A，历史输出回放成功', /hello|SESSION_A_ONLY/.test(c2.terms.get(A).buf));
   await c2.type(A, 'echo AFTER_REFRESH'); await c2.waitIdle(A);
   check('13. 刷新后仍可向 A 发送命令并收到输出', c2.terms.get(A).count('AFTER_REFRESH') >= 1);
   check('14. 刷新后无双倍回显: AFTER_REFRESH 计数=2', c2.terms.get(A).count('AFTER_REFRESH') === 2, `实际=${c2.terms.get(A).count('AFTER_REFRESH')}`);
