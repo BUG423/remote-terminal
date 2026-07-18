@@ -1,0 +1,46 @@
+[Unit]
+Description=Remote Terminal relay and remote Agent monitor
+Wants=network-online.target
+After=network-online.target nginx.service remote-terminal-server.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/remote-terminal
+Environment=NODE_ENV=production
+Environment=RT_MONITOR_CONFIG=/etc/remote-terminal/server.json
+Environment=RT_MONITOR_STATE=/var/lib/remote-terminal-monitor/status.json
+Environment=RT_MONITOR_AUTO_HEAL=0
+Environment=RT_MONITOR_ENFORCE_NO_AGENT=0
+EnvironmentFile=-/etc/remote-terminal/monitor.env
+ExecStart=/usr/bin/node /opt/remote-terminal/scripts/monitor-server.js
+TimeoutStartSec=45s
+UMask=0027
+StateDirectory=remote-terminal-monitor
+StateDirectoryMode=0750
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_KILL CAP_SYS_PTRACE
+LockPersonality=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/remote-terminal-monitor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+Nice=10
+IOSchedulingClass=idle
+TasksMax=32
+MemoryHigh=96M
+MemoryMax=128M
+

@@ -64,6 +64,26 @@ test('systemd 单元使用独立低权限账户和资源上限', () => {
   assert(agentUnit.includes('ReadWritePaths=/var/lib/remote-terminal-agent'));
 });
 
+test('定期监控单元默认只读且由环境文件显式启用恢复策略', () => {
+  const monitorUnit = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-monitor.service'), 'utf8');
+  const monitorTimer = fs.readFileSync(path.join(root, 'deploy/systemd/remote-terminal-monitor.timer'), 'utf8');
+  assert(monitorUnit.includes('Type=oneshot'));
+  assert(monitorUnit.includes('Environment=RT_MONITOR_AUTO_HEAL=0'));
+  assert(monitorUnit.includes('Environment=RT_MONITOR_ENFORCE_NO_AGENT=0'));
+  assert(monitorUnit.includes('EnvironmentFile=-/etc/remote-terminal/monitor.env'));
+  assert(monitorUnit.includes('StateDirectory=remote-terminal-monitor'));
+  assert(monitorUnit.includes('NoNewPrivileges=true'));
+  assert(monitorUnit.includes('MemoryMax='));
+  assert(monitorTimer.includes('OnUnitInactiveSec=5min'));
+  assert(monitorTimer.includes('Persistent=true'));
+  assert(!monitorUnit.includes('/agent/index.js'));
+});
+
+test('监控脚本通过 Node 语法检查', () => {
+  const result = spawnSync(process.execPath, ['--check', 'scripts/monitor-server.js'], { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} 项目文件检查通过`);
 if (passed !== results.length) process.exit(1);

@@ -123,6 +123,49 @@ bash deploy.sh
 
 `deploy.sh` 只接受干净的现有 Git 工作区，只做 `origin/main` 快进更新、`npm ci`、PM2 重载和健康检查。它不会上传配置、安装系统包、修改防火墙或覆盖 Nginx。
 
+## 定期监控中继
+
+`deploy/systemd/remote-terminal-monitor.*` 提供无常驻进程的定期监控。Timer 默认每 5 分钟检查：
+
+- Server、Nginx 和内部 `/health`
+- Nginx 本机 TLS 页面及证书校验
+- 指定远程 Agent 的在线状态和会话数
+- 系统负载、可用内存和根分区使用率
+- 中继服务器是否误运行了 Remote Terminal Agent
+
+为具体服务器创建 root-only 环境文件：
+
+```bash
+sudo install -m 0644 deploy/systemd/remote-terminal-monitor.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/remote-terminal-monitor.timer /etc/systemd/system/
+
+sudo install -d -m 0711 /etc/remote-terminal
+sudo sh -c 'cat > /etc/remote-terminal/monitor.env' <<'EOF'
+RT_MONITOR_DEVICE_ID=production-a
+RT_MONITOR_TLS_HOST=terminal.example.cn
+RT_MONITOR_TLS_PORT=443
+RT_MONITOR_AUTO_HEAL=1
+RT_MONITOR_ENFORCE_NO_AGENT=1
+EOF
+sudo chmod 0600 /etc/remote-terminal/monitor.env
+
+sudo systemctl daemon-reload
+sudo systemctl start remote-terminal-monitor.service
+sudo systemctl enable --now remote-terminal-monitor.timer
+```
+
+`RT_MONITOR_AUTO_HEAL=1` 允许在 Server 或 Nginx 停止、内部健康检查失败时执行一次重启。`RT_MONITOR_ENFORCE_NO_AGENT=1` 用于纯中继主机：它会禁用本机 Agent 单元，并终止该主机上的 Remote Terminal Agent 进程；远程 Agent 离线时只记录严重状态，绝不会在中继主机启动替代 Agent。
+
+查看最新状态、执行日志和下一次运行时间：
+
+```bash
+sudo cat /var/lib/remote-terminal-monitor/status.json
+sudo journalctl -u remote-terminal-monitor.service -n 50 --no-pager
+systemctl list-timers remote-terminal-monitor.timer --no-pager
+```
+
+状态文件不包含 Token。正常业务异常写入状态文件和 journald；监控程序自身崩溃才会让 oneshot 单元失败。
+
 ## 运行 Agent
 
 ```bash

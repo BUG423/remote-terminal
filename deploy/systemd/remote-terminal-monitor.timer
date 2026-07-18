@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Remote Terminal monitoring every five minutes
+
+[Timer]
+Unit=remote-terminal-monitor.service
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=15s
+RandomizedDelaySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
