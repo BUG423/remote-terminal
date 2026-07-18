@@ -43,6 +43,11 @@ test('不会把 Server 或 stockagent 当作 Remote Terminal Agent', () => {
   assert.equal(isForbiddenAgentProcess('/root/workspace/stockagent', 'node\0index.js\0'), false);
 });
 
+test('不会误判正文中提到 Agent 路径的 Bash 运维命令', () => {
+  const command = 'bash\0-c\0pgrep node /opt/remote-terminal/agent/index.js\0';
+  assert.equal(isForbiddenAgentProcess('/root', command), false);
+});
+
 test('多设备配置必须显式选择被监控设备', () => {
   const config = { devices: { a: { browserToken: 'a'.repeat(32) }, b: { browserToken: 'b'.repeat(32) } } };
   assert.throws(() => selectDevice(config, ''), /RT_MONITOR_DEVICE_ID/);

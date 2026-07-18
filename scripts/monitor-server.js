@@ -64,11 +64,16 @@ function serviceEnabledState(unit) {
 
 function isForbiddenAgentProcess(cwd, cmdline) {
   const normalizedCwd = String(cwd || '').replace(/\/+$/, '');
-  const normalizedCommand = String(cmdline || '').replace(/\0/g, ' ');
+  const rawCommand = String(cmdline || '');
+  const args = rawCommand.includes('\0')
+    ? rawCommand.split('\0').filter(Boolean)
+    : rawCommand.trim().split(/\s+/).filter(Boolean);
+  const executable = path.basename(args[0] || '');
+  const normalizedCommand = args.slice(1).join(' ');
   const cwdIsAgent = /\/remote-terminal\/agent$/.test(normalizedCwd);
   const commandRunsAgent = /(?:^|\s)(?:\.\/)?agent\/index\.js(?:\s|$)/.test(normalizedCommand) ||
     /\/remote-terminal\/agent\/index\.js(?:\s|$)/.test(normalizedCommand);
-  const runsNode = /(?:^|\/)node(?:\s|$)/.test(normalizedCommand);
+  const runsNode = executable === 'node' || executable === 'nodejs';
   return runsNode && (cwdIsAgent || commandRunsAgent);
 }
 
